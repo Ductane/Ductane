@@ -118,6 +118,7 @@ guard let metalLayer = view.layer as? CAMetalLayer else {
     print("DuctaneSample: the view has no CAMetalLayer")
     exit(1)
 }
+FrameRenderer.prepare(metalLayer, device: engine.device)
 let displayLink = engine.makeDisplayLink(for: metalLayer)
 displayLink.add(to: .main, forMode: .common)
 
