@@ -13,16 +13,15 @@ using namespace metal;
 /// there is no padding for the two sides to disagree about — the lesson this codebase has learned
 /// three times already.
 struct DUParticle {
-    float4 positionAndHalfSize;   // xyz world position, w half the edge in metres
+    float4 position;              // xyz world position
     float4 colourAndCoverage;     // rgb colour premultiplied by opacity, a coverage (0 for light)
     float4 spriteCell;            // atlas u0, v0, du, dv — du 0 for a soft disc
-    float4 widthScale;            // x: width against height — a wingbeat
+    float4 right;                 // xyz half its width, in the world
+    float4 up;                    // xyz half its height, in the world — along the view, its motion or an axis
 };
 
 struct DUParticleFrame {
     float4x4 viewProjection;
-    float4   right;               // the camera's, so every quad faces it
-    float4   up;
 };
 
 struct DUParticleOut {
@@ -33,9 +32,9 @@ struct DUParticleOut {
     float sprite;
 };
 
-/// **Expanded from one instance in the vertex shader**, so the CPU writes a position and a color
-/// per particle rather than four corners. The corner is the vertex id; the camera's axes arrive
-/// once per frame.
+/// **Expanded from one instance in the vertex shader**, so the CPU writes a position, a colour and two half-edges per
+/// particle rather than four corners. The corner is the vertex id; the edges say which way the quad lies — square to the
+/// view, along its motion, or along an axis (`ParticleSystem.extent`).
 vertex DUParticleOut duParticleVertex(uint vertexID [[vertex_id]],
                                       uint instanceID [[instance_id]],
                                       const device DUParticle *particles [[buffer(0)]],
@@ -45,8 +44,7 @@ vertex DUParticleOut duParticleVertex(uint vertexID [[vertex_id]],
     const float2 corners[4] = { float2(-1, -1), float2(1, -1), float2(-1, 1), float2(1, 1) };
     const float2 corner = corners[vertexID];
     const DUParticle p = particles[instanceID];
-    const float3 world = p.positionAndHalfSize.xyz
-                       + (frame.right.xyz * corner.x * p.widthScale.x + frame.up.xyz * corner.y) * p.positionAndHalfSize.w;
+    const float3 world = p.position.xyz + p.right.xyz * corner.x + p.up.xyz * corner.y;
 
     DUParticleOut out;
     out.position = frame.viewProjection * float4(world, 1.0);
