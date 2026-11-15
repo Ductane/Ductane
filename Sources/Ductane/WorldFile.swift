@@ -464,6 +464,10 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
 
         private enum CodingKeys: String, CodingKey { case size, resolution, heights, colours, holes, weights, layers }
 
+        /// The grid sizes a ground may have, in cells a side: 16,384 is 268 million points, far past any world's and still
+        /// clear of overflowing a point count or a file size.
+        public static let resolutions = 1...16_384
+
         /// How many layers a point's weights hold.
         public static let layerCount = 8
 
@@ -591,11 +595,20 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
     // MARK: Reading and writing
 
     /// Reads a description, refusing one newer than this engine reads or one whose placements name props it lacks.
+    /// **A description is data from anyone**: every index into ``props`` is checked — placements and what they wear,
+    /// characters, effect meshes, liquids, grime, collision shapes, what is walked through — and the ground's grid kept to
+    /// a size its files can hold, so nothing read from it traps or overflows later.
     public static func read(_ data: Data) throws -> WorldFile {
         let file = try JSONDecoder().decode(WorldFile.self, from: data)
         guard file.version <= version else { throw ReadError.newer(file.version) }
         if let bad = file.placements.first(where: { !file.props.indices.contains($0.prop) || $0.matrix.count != 16 }) {
             throw ReadError.badPlacement(bad.prop)
+        }
+        let named = file.placements.flatMap { $0.materials.values.map(\.prop) } + file.characters + Array(file.effectMeshes.values)
+            + file.liquids.map(\.prop) + file.grime.map(\.prop) + Array(file.collisionShapes.keys) + file.walkedThrough
+        if let bad = named.first(where: { !file.props.indices.contains($0) }) { throw ReadError.badProp(bad) }
+        if let ground = file.ground, !Ground.resolutions.contains(ground.resolution) {
+            throw ReadError.badGround(ground.resolution)
         }
         return file
     }
@@ -612,12 +625,16 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         case badPlacement(Int)
         case notWholeTriangles(bytes: Int)
         case wrongWeights(String)
+        case badProp(Int)
+        case badGround(Int)
         public var description: String {
             switch self {
             case .newer(let v): "the world file is version \(v); this engine reads up to \(WorldFile.version)"
             case .badPlacement(let p): "a placement names prop \(p), which the file does not list, or has no transform"
             case .notWholeTriangles(let bytes): "a collision shape of \(bytes) bytes is not whole triangles (36 bytes each)"
             case .wrongWeights(let path): "\(path) is not eight bytes a point of the ground"
+            case .badProp(let p): "the file names prop \(p), which it does not list"
+            case .badGround(let r): "a ground of \(r) cells a side is not one this engine reads (\(Ground.resolutions))"
             }
         }
     }

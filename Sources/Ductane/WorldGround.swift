@@ -38,8 +38,12 @@ public nonisolated struct WorldGround: Sendable, Equatable {
     /// Reads the files a world's ground is.
     public init(_ description: WorldFile.Ground, heights heightData: Data, colours colourData: Data,
                 holes holeData: Data? = nil) throws {
+        // Bounded first: a grid size from a file is data from anyone, and squared unchecked it can overflow.
+        guard WorldFile.Ground.resolutions.contains(description.resolution) else {
+            throw WorldGroundError.wrongSize(expected: 0, heights: heightData.count / 4, colours: colourData.count / 3)
+        }
         let points = (description.resolution + 1) * (description.resolution + 1)
-        guard description.resolution > 0, heightData.count == points * 4, colourData.count == points * 3 else {
+        guard heightData.count == points * 4, colourData.count == points * 3 else {
             throw WorldGroundError.wrongSize(expected: points, heights: heightData.count / 4, colours: colourData.count / 3)
         }
         let heights = heightData.withUnsafeBytes { raw in

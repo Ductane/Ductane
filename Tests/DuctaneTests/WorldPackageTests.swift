@@ -125,6 +125,17 @@ struct WorldPackageTests {
             try WorldPackage(contentsOf: bare, cache: work.appending(path: "Cache"))
         }
         for name in ["/etc/x", "a/../b", "./a", "a//b", "a\\b"] { #expect(WorldPackage.safePath(name) == nil, "\(name)") }
+
+        // A description naming a file outside the package is refused, though every entry is inside it.
+        var entries = try Self.entries()
+        var world = try WorldFile.read(entries[3].1)
+        world.collisionShapes = [0: "../../outside.f32"]
+        entries[3].1 = try world.data()
+        let naming = work.appending(path: "Naming.usdz")
+        try StoredZip.data(entries).write(to: naming)
+        #expect(throws: WorldPackage.OpenError.unsafeEntry("../../outside.f32")) {
+            try WorldPackage(contentsOf: naming, cache: work.appending(path: "Cache"))
+        }
         #expect(WorldPackage.safePath("props/1_A/A.usda") == "props/1_A/A.usda")
     }
 }

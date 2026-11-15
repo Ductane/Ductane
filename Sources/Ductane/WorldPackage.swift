@@ -16,7 +16,8 @@ import simd
 /// replacing what was there. A folder holding the same files — a package unzipped — is read in place.
 ///
 /// **A package is data from anyone**: an entry naming a path outside the package (absolute, or climbing out with `..`)
-/// is refused, never written.
+/// is refused, never written; so is a description naming a file outside it, and ``WorldFile/read(_:)`` checks every
+/// index and the ground's size, so nothing read through a package traps or overflows.
 public nonisolated struct WorldPackage: Sendable {
 
     /// Where a package keeps its world description.
@@ -43,7 +44,14 @@ public nonisolated struct WorldPackage: Sendable {
         }
         let description = folder.appending(path: Self.descriptionPath)
         guard FileManager.default.fileExists(atPath: description.path) else { throw OpenError.noDescription(url.lastPathComponent) }
-        world = try WorldFile.read(Data(contentsOf: description))
+        let world = try WorldFile.read(Data(contentsOf: description))
+        // Every file the description names stays inside the package, as every entry unpacked from it does.
+        let named = world.props + Array(world.collisionShapes.values)
+            + [world.ground?.heights, world.ground?.colours, world.ground?.holes, world.ground?.weights].compactMap { $0 }
+        if let outside = named.first(where: { Self.safePath($0) == nil || $0.hasSuffix("/") }) {
+            throw OpenError.unsafeEntry(outside)
+        }
+        self.world = world
     }
 
     /// The app's own caches, in a folder of their own — the container's when sandboxed.

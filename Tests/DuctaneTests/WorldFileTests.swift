@@ -197,6 +197,28 @@ struct WorldFileTests {
         #expect(throws: WorldFile.ReadError.newer(WorldFile.version + 1)) { try WorldFile.read(newer.data()) }
     }
 
+    @Test("Every index a file names must be a prop it lists, and its ground a size the engine reads")
+    func refusesBadIndices() throws {
+        func refused(_ change: (inout WorldFile) -> Void) -> Bool {
+            var file = world()
+            change(&file)
+            return (try? WorldFile.read(file.data())) == nil
+        }
+        #expect(refused { $0.characters = [9] })
+        #expect(refused { $0.effectMeshes = ["Frog": 5] })
+        #expect(refused { $0.walkedThrough = [-1] })
+        #expect(refused { $0.collisionShapes = [7: "game/collision/7.f32"] })
+        #expect(refused { $0.placements[1].materials = ["Atlas01": .init(prop: 3, name: "X")] })
+        let look = try JSONDecoder().decode(WorldFile.Liquid.Look.self, from: Data(Self.goopJSON.utf8))
+        #expect(refused { $0.liquids = [WorldFile.Liquid(prop: 4, material: "M", look: look)] })
+        #expect(refused { $0.ground = WorldFile.Ground(size: 4, resolution: Int.max / 2) })
+        #expect(refused { $0.ground = WorldFile.Ground(size: 4, resolution: 0) })
+        #expect(!refused { $0.characters = [1] }, "an index it lists reads")
+        #expect(throws: WorldGroundError.self) {
+            try WorldGround(WorldFile.Ground(size: 4, resolution: Int.max / 2), heights: Data(), colours: Data())
+        }
+    }
+
     @Test("A collision shape is written and read back as whole triangles; a torn file is refused")
     func collisionShape() throws {
         let ramp: [SIMD3<Float>] = [SIMD3(0, 0, 0), SIMD3(1, 0, 0), SIMD3(1, 1.5, -2.5)]
