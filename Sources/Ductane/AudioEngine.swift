@@ -59,6 +59,14 @@ public nonisolated enum AudioEngineError: Error, CustomStringConvertible, Sendab
 /// what a small, near sound does. Measured, not argued — see ``renderOffline(seconds:)``. Both curves,
 /// and the number of one-shot voices, are a game's to set: ``Configuration``.
 ///
+/// ### And a reach per sound, for a world laid out in an editor
+///
+/// **A sound given a reach carries exactly that far** (``SoundReach``): ``startLoop(_:at:volume:reach:)`` and
+/// ``playAmbient(_:at:volume:reach:)`` go through a third spatializer that attenuates nothing, and each voice is levelled
+/// from its own reach as the listener moves — a generator heard from 60 m beside a drip heard from 5, which no one
+/// curve can hold. **Any recording can be placed**: a stereo or 96 kHz file is mixed to one channel at the engine's rate
+/// the first time it is placed, and kept.
+///
 /// ### Lifecycle
 ///
 /// An engine plays from the moment it is made. ``pause()`` holds everything — one-shots, loops and
@@ -130,6 +138,21 @@ public final class AudioEngine {
     private let ambienceBus = AVAudioMixerNode()
     /// Ambient beds playing — see ``startAmbience(_:volume:)``.
     private var beds: [Int: AVAudioPlayerNode] = [:]
+    /// **The spatializer for sounds with a reach of their own** — see ``startLoop(_:at:volume:reach:)``. It attenuates
+    /// nothing: each voice's level is set from its own reach (``SoundReach``) as the listener moves, and the node only
+    /// says which way the sound is.
+    private let reachEnvironment = AVAudioEnvironmentNode()
+    /// Loops with a reach, by id: where each is, how loud, how far it carries.
+    private var reached: [Int: SoundReach.Placed] = [:]
+    private var idleReachPlayers: [AVAudioPlayerNode] = []
+    /// One-shots with a reach — ``playAmbient(_:at:volume:reach:)`` — a ring like the range one-shots'.
+    private var ambientVoices: [AVAudioPlayerNode] = []
+    private var nextAmbientVoice = 0
+    /// Where the ears are, for the reached sounds' levels.
+    private var listener = SIMD3<Float>.zero
+    /// Sounds as a placed voice plays them — mono at the engine's rate, made from ``buffers`` the first time one is
+    /// placed.
+    private var placedBuffers: [String: AVAudioPCMBuffer] = [:]
     private var players: [AVAudioPlayerNode] = []
     private var nextVoice = 0
     private var buffers: [String: AVAudioPCMBuffer] = [:]
@@ -201,6 +224,12 @@ public final class AudioEngine {
         engine.connect(ambienceBus, to: engine.mainMixerNode, format: nil)
         engine.attach(nearEnvironment)
         engine.connect(nearEnvironment, to: ambienceBus, format: nil)
+        engine.attach(reachEnvironment)
+        engine.connect(reachEnvironment, to: ambienceBus, format: nil)
+        // No attenuation of its own: every voice through it is levelled by its reach.
+        reachEnvironment.distanceAttenuationParameters.distanceAttenuationModel = .inverse
+        reachEnvironment.distanceAttenuationParameters.referenceDistance = 1
+        reachEnvironment.distanceAttenuationParameters.rolloffFactor = 0
 
         // Distance attenuation in metres, matching the world's units.
         for (node, falloff) in [(environment, configuration.oneShotFalloff),
@@ -229,6 +258,13 @@ public final class AudioEngine {
             player.renderingAlgorithm = .auto
             players.append(player)
         }
+        for _ in 0..<configuration.voiceCount {
+            let player = AVAudioPlayerNode()
+            engine.attach(player)
+            engine.connect(player, to: reachEnvironment, format: mono)
+            player.renderingAlgorithm = .auto
+            ambientVoices.append(player)
+        }
 
         do {
             if isOffline {
@@ -245,6 +281,7 @@ public final class AudioEngine {
             throw AudioEngineError.couldNotStart(reason: error.localizedDescription)
         }
         players.forEach { $0.play() }
+        ambientVoices.forEach { $0.play() }
         followAppFocus()
     }
 
@@ -347,6 +384,7 @@ public final class AudioEngine {
         buffer.frameLength = AVAudioFrameCount(samples.count)
         samples.withUnsafeBufferPointer { data[0].update(from: $0.baseAddress!, count: samples.count) }
         buffers[name] = buffer
+        placedBuffers[name] = nil
     }
 
     /// Where the ears are. Call once per frame.
@@ -355,11 +393,13 @@ public final class AudioEngine {
         let orientation = AVAudio3DVectorOrientation(
             forward: AVAudio3DVector(x: forward.x, y: forward.y, z: forward.z),
             up: AVAudio3DVector(x: up.x, y: up.y, z: up.z))
-        // Both spatialisers hear from the same head.
-        for node in [environment, nearEnvironment] {
+        // Every spatialiser hears from the same head.
+        for node in [environment, nearEnvironment, reachEnvironment] {
             node.listenerPosition = point
             node.listenerVectorOrientation = orientation
         }
+        listener = position
+        for (id, sound) in reached { loops[id]?.volume = sound.level(heardFrom: position) }
     }
 
     // MARK: - Loops
@@ -373,10 +413,26 @@ public final class AudioEngine {
     /// **Keep what it returns**: a loop nobody holds cannot be stopped, short of ``stopAllLoops()``.
     /// `nil` when no sound of that name is loaded.
     public func startLoop(_ name: String, at position: SIMD3<Float>, volume: Float = 1) -> Loop? {
-        guard let buffer = buffers[name], buffer.frameLength > 0 else { return nil }
-        let player = idleLoopPlayers.popLast() ?? makeLoopPlayer()
+        startLoop(name, at: position, volume: volume, reach: nil)
+    }
+
+    /// **Starts a sound looping at a world position that carries as far as its own reach** — a generator heard from 60 m
+    /// beside a drip heard from 5 — full near it and fading to silence at `reach` metres (``SoundReach``). Through a
+    /// spatializer of its own that only says which way the sound is; its level is set from the reach each time the
+    /// listener moves. Under ``loopVolume`` with every loop. `nil` when no sound of that name is loaded.
+    public func startLoop(_ name: String, at position: SIMD3<Float>, volume: Float = 1, reach: Float?) -> Loop? {
+        guard let buffer = placedBuffer(name), buffer.frameLength > 0 else { return nil }
+        let player: AVAudioPlayerNode
+        if let reach {
+            player = idleReachPlayers.popLast() ?? makeLoopPlayer(through: reachEnvironment)
+            let sound = SoundReach.Placed(position: position, volume: max(volume, 0), reach: SoundReach.clamped(reach))
+            reached[nextLoop] = sound
+            player.volume = sound.level(heardFrom: listener)
+        } else {
+            player = idleLoopPlayers.popLast() ?? makeLoopPlayer(through: nearEnvironment)
+            player.volume = volume
+        }
         player.position = AVAudio3DPoint(x: position.x, y: position.y, z: position.z)
-        player.volume = volume
         let id = nextLoop
         nextLoop += 1
         // A different starting point for every loop: Knuth's multiplicative hash of its number.
@@ -419,8 +475,33 @@ public final class AudioEngine {
         beds[loop.id]?.volume = max(volume, 0)
     }
 
+    /// **Any loop's level** — placed, reached or a bed — for a game that fades one, or an editor whose slider moved.
+    public func setLoopVolume(_ loop: Loop, to volume: Float) {
+        if beds[loop.id] != nil { return setAmbienceVolume(loop, to: volume) }
+        if var sound = reached[loop.id] {
+            sound.volume = max(volume, 0)
+            reached[loop.id] = sound
+            loops[loop.id]?.volume = sound.level(heardFrom: listener)
+        } else {
+            loops[loop.id]?.volume = max(volume, 0)
+        }
+    }
+
+    /// A reached loop's reach, in metres — an editor's slider. Does nothing to a loop started without one.
+    public func setLoopReach(_ loop: Loop, to reach: Float) {
+        guard var sound = reached[loop.id] else { return }
+        sound.reach = SoundReach.clamped(reach)
+        reached[loop.id] = sound
+        loops[loop.id]?.volume = sound.level(heardFrom: listener)
+    }
+
     public func moveLoop(_ loop: Loop, to position: SIMD3<Float>) {
         loops[loop.id]?.position = AVAudio3DPoint(x: position.x, y: position.y, z: position.z)
+        if var sound = reached[loop.id] {
+            sound.position = position
+            reached[loop.id] = sound
+            loops[loop.id]?.volume = sound.level(heardFrom: listener)
+        }
     }
 
     public func stopLoop(_ loop: Loop) {
@@ -431,7 +512,11 @@ public final class AudioEngine {
         }
         guard let player = loops.removeValue(forKey: loop.id) else { return }
         player.stop()
-        idleLoopPlayers.append(player)
+        if reached.removeValue(forKey: loop.id) != nil {
+            idleReachPlayers.append(player)
+        } else {
+            idleLoopPlayers.append(player)
+        }
     }
 
     public func stopAllLoops() {
@@ -443,13 +528,69 @@ public final class AudioEngine {
 
     /// **Made on demand and kept**, unlike the one-shots' fixed ring: a level has as many loops as it
     /// has things that hum, and a voice stolen from a brazier by a footstep is a fire that goes out.
-    private func makeLoopPlayer() -> AVAudioPlayerNode {
+    private func makeLoopPlayer(through environment: AVAudioEnvironmentNode) -> AVAudioPlayerNode {
         let player = AVAudioPlayerNode()
         engine.attach(player)
-        engine.connect(player, to: nearEnvironment, format: monoFormat)
+        engine.connect(player, to: environment, format: monoFormat)
         // As the one-shots: a fire to your left should sound as if it is on your left.
         player.renderingAlgorithm = .auto
         return player
+    }
+
+    /// **A sound as a placed voice plays it: one channel at the engine's rate.** A spatializer needs a point source, and
+    /// a placed voice is connected in that format — so a stereo recording, or one at 96 kHz, is mixed down and converted
+    /// once, the first time it is placed, and kept. Scheduled as it came, it would stop the engine: AVFoundation raises
+    /// on a buffer whose format is not its player's. Unplaced sounds keep their own channels and rate.
+    private func placedBuffer(_ name: String) -> AVAudioPCMBuffer? {
+        if let made = placedBuffers[name] { return made }
+        guard let buffer = buffers[name], let made = AudioEngine.converted(buffer, to: monoFormat) else { return nil }
+        placedBuffers[name] = made
+        return made
+    }
+
+    /// `buffer` as one channel at `format`'s rate: its channels averaged, then converted.
+    nonisolated static func converted(_ buffer: AVAudioPCMBuffer, to format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        let source = buffer.format
+        if source.channelCount == 1, source.sampleRate == format.sampleRate, source.commonFormat == format.commonFormat,
+           !source.isInterleaved {
+            return buffer
+        }
+        guard let mono = AVAudioFormat(standardFormatWithSampleRate: source.sampleRate, channels: 1),
+              let mixed = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: max(buffer.frameLength, 1)),
+              let from = buffer.floatChannelData, let to = mixed.floatChannelData else { return nil }
+        let frames = Int(buffer.frameLength), channels = Int(source.channelCount)
+        mixed.frameLength = buffer.frameLength
+        let scale = 1 / Float(max(channels, 1))
+        for frame in 0..<frames {
+            var sum: Float = 0
+            for channel in 0..<channels { sum += from[channel][frame] }
+            to[0][frame] = sum * scale
+        }
+        if source.sampleRate == format.sampleRate { return mixed }
+        guard let converter = AVAudioConverter(from: mono, to: format) else { return nil }
+        let capacity = AVAudioFrameCount((Double(frames) * format.sampleRate / source.sampleRate).rounded(.up)) + 64
+        guard let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else { return nil }
+        let handed = HandedOnce(mixed)
+        var error: NSError?
+        let status = converter.convert(to: out, error: &error) { _, state in
+            guard let buffer = handed.take() else {
+                state.pointee = .endOfStream
+                return nil
+            }
+            state.pointee = .haveData
+            return buffer
+        }
+        return status == .error || out.frameLength == 0 ? nil : out
+    }
+
+    /// The input a converter is given once — called on the converting thread, synchronously.
+    nonisolated private final class HandedOnce: @unchecked Sendable {
+        private var buffer: AVAudioPCMBuffer?
+        init(_ buffer: AVAudioPCMBuffer) { self.buffer = buffer }
+        func take() -> AVAudioPCMBuffer? {
+            defer { buffer = nil }
+            return buffer
+        }
     }
 
     /// The frames of `buffer` from `start` to its end, as a buffer of their own.
@@ -503,7 +644,7 @@ public final class AudioEngine {
     /// paused, is exact to the sample in an offline render, and a sound still waiting is cancelled by
     /// ``stop()`` — none of which held while it was a `DispatchQueue` timer.
     public func play(_ name: String, at position: SIMD3<Float>, volume: Float = 1, delay: Float = 0) {
-        guard let buffer = buffers[name] else { return }
+        guard let buffer = placedBuffer(name) else { return }
 
         let player = players[nextVoice]
         nextVoice = (nextVoice + 1) % players.count
@@ -511,6 +652,22 @@ public final class AudioEngine {
         player.position = AVAudio3DPoint(x: position.x, y: position.y, z: position.z)
         player.volume = volume
         player.scheduleBuffer(buffer, at: startTime(on: player, after: delay), options: .interrupts)
+    }
+
+    /// **A one-shot of the place rather than of play** — a crow, a creak, distant metal — at a world position, as loud
+    /// as its own reach allows from where the listener is when it starts (``SoundReach``). **Under ``loopVolume``**, with
+    /// the loops and beds, because it is part of a world's ambience: a player who turns the ambience down expects the
+    /// crows to go with the wind. A ring of ``Configuration/voiceCount`` voices of its own; when all are busy the oldest
+    /// is cut. Nothing when no sound of that name is loaded, or the listener is beyond its reach.
+    public func playAmbient(_ name: String, at position: SIMD3<Float>, volume: Float = 1, reach: Float) {
+        let sound = SoundReach.Placed(position: position, volume: max(volume, 0), reach: SoundReach.clamped(reach))
+        let level = sound.level(heardFrom: listener)
+        guard level > 0, let buffer = placedBuffer(name), buffer.frameLength > 0, !ambientVoices.isEmpty else { return }
+        let player = ambientVoices[nextAmbientVoice]
+        nextAmbientVoice = (nextAmbientVoice + 1) % ambientVoices.count
+        player.position = AVAudio3DPoint(x: position.x, y: position.y, z: position.z)
+        player.volume = level
+        player.scheduleBuffer(buffer, at: nil, options: .interrupts)
     }
 
     /// When a voice should start a sound `delay` seconds from now, on its own timeline; `nil` — as soon
@@ -690,6 +847,7 @@ public final class AudioEngine {
         if isMetering { engine.mainMixerNode.removeTap(onBus: 0) }
         stopAllLoops()
         players.forEach { $0.stop() }
+        ambientVoices.forEach { $0.stop() }
         directVoices.values.forEach { $0.voices.forEach { $0.player.stop() } }
         engine.stop()
     }

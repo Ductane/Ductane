@@ -7,7 +7,7 @@ import AppKit
 import AVFoundation
 import Observation
 
-/// **A game's score**: one track at a time, looped, faded in and out.
+/// **A game's score**: one track at a time, looped — or a list of them in turn — faded in and out.
 ///
 /// **Not spatialized, and that is a decision rather than an omission.** Score is not a sound in the world:
 /// a positional music source swings across the stereo field as the camera turns, which is the single most
@@ -52,10 +52,15 @@ public final class MusicPlayer {
     /// longer than about a third of a second is still audible over the app they switched to.
     public var focusFade: TimeInterval = 0.3
 
-    /// The track asked for, whether or not it is playing.
-    public private(set) var track: URL?
-    /// The track that is playing.
-    public private(set) var playing: URL?
+    /// The tracks asked for, in order, whether or not they are playing — one track loops, several play in turn and the
+    /// list comes round again.
+    public private(set) var playlist: [URL] = []
+    /// What is playing, as it was asked for.
+    private var playingList: [URL] = []
+    /// The track asked for — the playlist's first — whether or not it is playing.
+    public var track: URL? { playlist.first }
+    /// The track — the playlist's first — that is playing.
+    public var playing: URL? { playingList.first }
 
     @ObservationIgnored private var isBackground = false
     @ObservationIgnored private let deck = Deck()
@@ -77,29 +82,38 @@ public final class MusicPlayer {
     /// Plays a track, looped, fading it in. **The track already playing is left alone**; another one fades
     /// out first. A file that will not open leaves the game silent rather than broken.
     public func play(_ url: URL) {
-        track = url
-        guard volume > 0, playing != url else { return }
-        if playing != nil { send { await $0.stop(fade: 0.6) } }
-        playing = url
+        play(playlist: [url])
+    }
+
+    /// **Plays tracks in turn, the list coming round again** — a world's score of several pieces; one track loops, as
+    /// ``play(_:)``. The first fades in; each after it follows when the one before ends. **The same list already playing
+    /// is left alone**; another one fades out first. An empty list stops the score. A track that will not open is
+    /// passed over.
+    public func play(playlist tracks: [URL]) {
+        guard !tracks.isEmpty else { return stop() }
+        playlist = tracks
+        guard volume > 0, playingList != tracks else { return }
+        if !playingList.isEmpty { send { await $0.stop(fade: 0.6) } }
+        playingList = tracks
         let (level, fade) = (volume, fadeIn)
-        send { await $0.start(url, volume: level, fadeIn: fade) }
+        send { await $0.start(tracks, volume: level, fadeIn: fade) }
         // A track asked for while the game is in the background starts quiet, not at full volume.
         if isQuiet { applyFocus() }
     }
 
     /// Stops the score, faded. The next ``play(_:)`` starts the track from the beginning.
     public func stop(fade: TimeInterval = 0.6) {
-        playing = nil
-        track = nil
+        playingList = []
+        playlist = []
         send { await $0.stop(fade: fade) }
     }
 
     private func volumeChanged() {
         if volume == 0 {
-            playing = nil
+            playingList = []
             send { await $0.stop(fade: 0) }
-        } else if playing == nil, let track {
-            play(track)
+        } else if playingList.isEmpty, !playlist.isEmpty {
+            play(playlist: playlist)
         } else if !isQuiet {
             let level = volume
             send { await $0.setVolume(level) }
@@ -144,22 +158,62 @@ public final class MusicPlayer {
 
     /// Whether the deck has a track playing right now — for a test.
     public func isAudible() async -> Bool { await deck.isPlaying }
+
+    /// The track the deck is playing right now — for a test, or a game that shows what is on.
+    public func current() async -> URL? { await deck.current }
 }
 
 /// The one `AVAudioPlayer`, owned by an actor so that nothing touching it runs on the main thread.
 private actor Deck {
     private var player: AVAudioPlayer?
+    private var tracks: [URL] = []
+    private var index = 0
+    /// Paused by ``hush(fade:)`` — a track that has not ended, so the next is not started.
+    private var hushed = false
+    /// Watches for a track's end, to start the next, while a list of more than one plays.
+    private var watcher: Task<Void, Never>?
 
     var isPlaying: Bool { player?.isPlaying ?? false }
+    var current: URL? { player?.url }
 
-    func start(_ url: URL, volume: Float, fadeIn: TimeInterval) {
-        guard player == nil, let player = try? AVAudioPlayer(contentsOf: url) else { return }
-        player.numberOfLoops = -1
-        player.volume = 0
+    func start(_ tracks: [URL], volume: Float, fadeIn: TimeInterval) {
+        guard player == nil, !tracks.isEmpty else { return }
+        self.tracks = tracks
+        hushed = false
+        // The first that opens, from the top.
+        for offset in tracks.indices {
+            if begin(at: offset, volume: volume, fadeIn: fadeIn) { break }
+        }
+        guard player != nil, tracks.count > 1 else { return }
+        watcher = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(250))
+                await self?.nextIfEnded()
+            }
+        }
+    }
+
+    /// Starts track `at`; false when it will not open.
+    private func begin(at index: Int, volume: Float, fadeIn: TimeInterval) -> Bool {
+        guard let player = try? AVAudioPlayer(contentsOf: tracks[index]) else { return false }
+        self.index = index
+        player.numberOfLoops = tracks.count == 1 ? -1 : 0
+        player.volume = fadeIn > 0 ? 0 : volume
         player.prepareToPlay()
         player.play()
-        player.setVolume(volume, fadeDuration: fadeIn)
+        if fadeIn > 0 { player.setVolume(volume, fadeDuration: fadeIn) }
         self.player = player
+        return true
+    }
+
+    /// The next track, at the level the one that ended had, once it has ended.
+    private func nextIfEnded() {
+        guard let ended = player, !hushed, !ended.isPlaying, tracks.count > 1 else { return }
+        let level = ended.volume
+        player = nil
+        for step in 1...tracks.count {
+            if begin(at: (index + step) % tracks.count, volume: level, fadeIn: 0) { return }
+        }
     }
 
     func setVolume(_ volume: Float) { player?.volume = volume }
@@ -167,6 +221,7 @@ private actor Deck {
     /// Fades out and **pauses**, keeping the place in the track and stopping the decoding.
     func hush(fade: TimeInterval) async {
         guard let player, player.isPlaying else { return }
+        hushed = true
         player.setVolume(0, fadeDuration: fade)
         try? await Task.sleep(for: .seconds(fade))
         player.pause()
@@ -176,6 +231,7 @@ private actor Deck {
     /// that level, which is what makes it safe on every focus change.
     func resume(volume: Float, fade: TimeInterval) async {
         guard let player else { return }
+        hushed = false
         if !player.isPlaying { player.play() }
         player.setVolume(volume, fadeDuration: fade)
     }
@@ -183,6 +239,9 @@ private actor Deck {
     /// Waits out the fade before stopping, so the next command — usually the next track — starts after
     /// this one has gone rather than on top of it.
     func stop(fade: TimeInterval) async {
+        watcher?.cancel()
+        watcher = nil
+        tracks = []
         guard let leaving = player else { return }
         player = nil
         if fade > 0 {

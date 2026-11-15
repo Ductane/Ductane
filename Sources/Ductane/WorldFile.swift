@@ -62,12 +62,15 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
     public var boundary: WorldBoundary?
     /// **How the way to a place is shown in this world** (``Waymark``). Nil: the engine's own look.
     public var waymark: Waymark.Look?
+    /// **What the world sounds like** — loops at places, ambience over areas, sounds now and then, its music (``Sounds``),
+    /// played as written by ``Soundscape``. Nil: a silent world.
+    public var sounds: Sounds?
 
     public init(name: String, props: [String], walkedThrough: [Int] = [], collisionShapes: [Int: String] = [:],
                 liquids: [Liquid] = [], characters: [Int] = [], effectMeshes: [String: Int] = [:], grime: [Grime] = [],
                 placements: [Placement], ground: Ground? = nil, sky: Sky = Sky(), lights: [Light] = [],
                 waters: [Water] = [], streams: [Stream] = [], effects: [Effect] = [], markers: [Marker] = [],
-                boundary: WorldBoundary? = nil, waymark: Waymark.Look? = nil) {
+                boundary: WorldBoundary? = nil, waymark: Waymark.Look? = nil, sounds: Sounds? = nil) {
         self.name = name
         self.props = props
         self.walkedThrough = walkedThrough
@@ -86,6 +89,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         self.markers = markers
         self.boundary = boundary
         self.waymark = waymark
+        self.sounds = sounds
     }
 
     /// **What a file leaves out is empty**, not an error: a list or a table not written is none, so a description written
@@ -111,11 +115,12 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         markers = try c.decodeIfPresent([Marker].self, forKey: .markers) ?? []
         boundary = try c.decodeIfPresent(WorldBoundary.self, forKey: .boundary)
         waymark = try c.decodeIfPresent(Waymark.Look.self, forKey: .waymark)
+        sounds = try c.decodeIfPresent(Sounds.self, forKey: .sounds)
     }
 
     private enum CodingKeys: String, CodingKey {
         case version, name, props, walkedThrough, collisionShapes, liquids, characters, effectMeshes, grime, placements,
-             ground, sky, lights, waters, streams, effects, markers, boundary, waymark
+             ground, sky, lights, waters, streams, effects, markers, boundary, waymark, sounds
     }
 
     // MARK: Markers
@@ -616,8 +621,11 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         let paths = file.props + Array(file.collisionShapes.values)
             + [file.ground?.heights, file.ground?.colours, file.ground?.holes, file.ground?.weights].compactMap { $0 }
             + file.liquids.flatMap(\.look.textureFiles) + file.grime.map(\.look.texture)
-        if let outside = paths.first(where: { WorldPackage.safePath($0) == nil || $0.hasSuffix("/") }) {
+        if let outside = (paths + (file.sounds?.files ?? [])).first(where: { WorldPackage.safePath($0) == nil || $0.hasSuffix("/") }) {
             throw ReadError.unsafePath(outside)
+        }
+        if let sounds = file.sounds, let bad = sounds.named.first(where: { !sounds.files.indices.contains($0) }) {
+            throw ReadError.badSound(bad)
         }
         return file
     }
@@ -637,6 +645,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         case badProp(Int)
         case badGround(Int)
         case unsafePath(String)
+        case badSound(Int)
         public var description: String {
             switch self {
             case .newer(let v): "the world file is version \(v); this engine reads up to \(WorldFile.version)"
@@ -645,6 +654,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
             case .wrongWeights(let path): "\(path) is not eight bytes a point of the ground"
             case .badProp(let p): "the file names prop \(p), which it does not list"
             case .unsafePath(let path): "the file names \(path), which is not a file inside its package"
+            case .badSound(let i): "a sound names file \(i), which the world's sound files do not have"
             case .badGround(let r): "a ground of \(r) cells a side is not one this engine reads (\(Ground.resolutions))"
             }
         }
