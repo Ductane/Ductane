@@ -292,10 +292,32 @@ public final class SkinnedModel {
     ///
     /// - Parameters: as ``SkinnedGeometry/read(url:vertexDescriptor:semantics:skeletonJointCount:)``; the descriptor is
     ///   the game's static one, the one its prop pipeline was built with.
-    public init(url: URL, device: MTLDevice, vertexDescriptor: MTLVertexDescriptor, semantics: [Int: String]) throws {
+    public convenience init(url: URL, device: MTLDevice, vertexDescriptor: MTLVertexDescriptor, semantics: [Int: String]) throws {
+        try self.init(Self.read(url: url, vertexDescriptor: vertexDescriptor, semantics: semantics), device: device,
+                      vertexDescriptor: vertexDescriptor, semantics: semantics)
+    }
+
+    /// **A character's file, read and not yet on the GPU** — what ``read(url:vertexDescriptor:semantics:)`` hands back,
+    /// from any thread, for ``init(_:device:vertexDescriptor:semantics:)`` to finish.
+    public nonisolated struct Source: Sendable {
+        public let url: URL
+        public let rig: Rig
+        let geometry: SkinnedGeometry
+    }
+
+    /// **The slow half of loading a character, off the main thread**: the skeleton, every clip and every skinned mesh
+    /// read and merged. A character takes a second or more to read — a game's window frozen for that long, several times
+    /// over, if it is read where it is drawn. Pass the same descriptor and semantics to the initialiser that finishes it.
+    public nonisolated static func read(url: URL, vertexDescriptor: MTLVertexDescriptor, semantics: [Int: String]) throws -> Source {
         let rig = try RigLoader.load(url: url)
         let geometry = try SkinnedGeometry.read(url: url, vertexDescriptor: vertexDescriptor, semantics: semantics,
                                                 skeletonJointCount: rig.skeleton.jointCount)
+        return Source(url: url, rig: rig, geometry: geometry)
+    }
+
+    /// **The quick half**: a character read by ``read(url:vertexDescriptor:semantics:)``, put into GPU buffers.
+    public init(_ source: Source, device: MTLDevice, vertexDescriptor: MTLVertexDescriptor, semantics: [Int: String]) throws {
+        let url = source.url, rig = source.rig, geometry = source.geometry
         self.rig = rig
         self.geometry = geometry
         self.device = device

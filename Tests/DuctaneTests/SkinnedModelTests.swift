@@ -17,7 +17,7 @@ struct SkinnedModelTests {
 
     /// A game's static layout: positions alone in buffer 0, texture coordinates and normals interleaved in buffer 1 —
     /// the shape a game keeps so a depth pass reads positions and nothing else.
-    static func gameLayout() -> MTLVertexDescriptor {
+    nonisolated static func gameLayout() -> MTLVertexDescriptor {
         let d = MTLVertexDescriptor()
         d.attributes[0].format = .float3; d.attributes[0].offset = 0; d.attributes[0].bufferIndex = 0
         d.attributes[1].format = .float2; d.attributes[1].offset = 0; d.attributes[1].bufferIndex = 1
@@ -151,5 +151,23 @@ struct SkinnedModelTests {
         #expect(SIMD3(still.0, still.1, still.2) == SIMD3(0.1, 2, 0))
         // And where the game binds them: posed layouts from the instance, the rest from the mesh.
         #expect(instance.vertexBufferAddress(0, frameSlot: slot) == instance.posedBuffer(0, frameSlot: slot)!.gpuAddress)
+    }
+
+    /// **Read off the main thread, finished on it**: a game reads its characters while its loading screen draws, then puts
+    /// them on the GPU — the same model either way.
+    @Test("A character read on another thread and finished here is the one loaded in one go")
+    func readElsewhere() async throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        let url = fixture, semantics = Self.semantics
+        let source = try await Task.detached {
+            try SkinnedModel.read(url: url, vertexDescriptor: SkinnedModelTests.gameLayout(), semantics: semantics)
+        }.value
+        let finished = try SkinnedModel(source, device: device, vertexDescriptor: Self.gameLayout(), semantics: semantics)
+        let direct = try SkinnedModel(url: url, device: device, vertexDescriptor: Self.gameLayout(), semantics: semantics)
+        #expect(source.url == url)
+        #expect(finished.vertexCount == direct.vertexCount && finished.partCount == direct.partCount)
+        #expect(finished.rig.clips.map(\.name).sorted() == direct.rig.clips.map(\.name).sorted())
+        #expect(finished.materials.map(\.name) == direct.materials.map(\.name))
+        #expect(finished.mesh.submeshes.map(\.indexCount) == direct.mesh.submeshes.map(\.indexCount))
     }
 }
