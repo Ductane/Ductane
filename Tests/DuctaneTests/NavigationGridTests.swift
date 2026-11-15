@@ -49,6 +49,39 @@ struct NavigationGridTests {
         #expect(path.count < 8, "corners, not cells: \(path.count) points")
     }
 
+    @Test("Dearer ground is gone round when going round is not much further, and its straight runs never cut back across it")
+    func roundDearGround() throws {
+        let grid = NavigationGrid(mesh: nil, ground: dryGround, around: .zero, reach: 16)
+        // A pool 6 m across, square in the middle, five times as costly to cross.
+        let pool: (SIMD3<Float>) -> Float = { p in abs(p.x) < 3 && abs(p.z) < 3 ? 4 : 0 }
+        let start = SIMD3<Float>(0, 0, 8), goal = SIMD3<Float>(0, 0, -8)
+        let path = try #require(grid.path(from: start, to: goal, extraCost: pool))
+        // Walked in small steps, the way stays out of the pool — grazing a corner by less than a cell at most, where a
+        // straight run between places is tested a cell at a time.
+        var previous = start
+        for p in path {
+            for k in 1...40 {
+                let q = previous + (p - previous) * (Float(k) / 40)
+                #expect(abs(q.x) > 3 - grid.cellSize || abs(q.z) > 3 - grid.cellSize, "through the pool at \(q): \(path)")
+            }
+            previous = p
+        }
+        #expect(simd_distance(try #require(path.last), goal) < 0.4)
+        // Without it, straight through.
+        #expect(try #require(grid.path(from: start, to: goal)).count == 1)
+    }
+
+    @Test("Dearer ground with no way round is crossed, by the way the search found")
+    func throughDearGround() throws {
+        let grid = NavigationGrid(mesh: nil, ground: dryGround, around: .zero, reach: 16)
+        // A band across the whole grid: there is no going round it.
+        let band: (SIMD3<Float>) -> Float = { p in abs(p.z) < 2 ? 4 : 0 }
+        let start = SIMD3<Float>(0, 0, 8), goal = SIMD3<Float>(0, 0, -8)
+        let path = try #require(grid.path(from: start, to: goal, extraCost: band))
+        #expect(simd_distance(try #require(path.last), goal) < 0.4)
+        #expect(length(path, from: start) < 17, "straight across, not along it: \(path)")
+    }
+
     @Test("No wall, no detour: a straight line is one point")
     func straight() throws {
         let grid = NavigationGrid(mesh: nil, ground: dryGround, around: .zero, reach: 16)

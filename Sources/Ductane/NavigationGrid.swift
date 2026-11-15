@@ -287,13 +287,20 @@ public nonisolated struct NavigationGrid: Sendable {
     /// in a straight line, the last the goal's standing place — or, if none can be reached, the reachable place nearest
     /// it, so a body comes as close as it can. Nil if either end is off the grid; empty if the start is the end.
     ///
-    /// - Parameter searchLimit: places looked at before settling for the nearest so far — a goal nobody can reach costs
-    ///   no more than this.
-    public func path(from start: SIMD3<Float>, to goal: SIMD3<Float>, searchLimit: Int = 12_000) -> [SIMD3<Float>]? {
+    /// - Parameters:
+    ///   - searchLimit: places looked at before settling for the nearest so far — a goal nobody can reach costs no more
+    ///     than this.
+    ///   - extraCost: **how much dearer a place is to cross than open ground**, asked of its standing position: 0 open
+    ///     ground, 1 twice the distance, 4 five times — mud, a hazard, anything a way should go round when going round
+    ///     is not much further. Never below 0. The way goes through such places only where going round costs more, and
+    ///     its straight runs are never drawn across places dearer than those the search went through. Nil, every place
+    ///     costs only its distance and climb.
+    public func path(from start: SIMD3<Float>, to goal: SIMD3<Float>, searchLimit: Int = 12_000,
+                     extraCost: ((SIMD3<Float>) -> Float)? = nil) -> [SIMD3<Float>]? {
         guard let from = place(near: start), let to = place(near: goal) else { return nil }
         guard from != to else { return [] }
-        let places = search(from: from, to: to, limit: searchLimit)
-        return smoothed(places)
+        let places = search(from: from, to: to, limit: searchLimit, extraCost: extraCost)
+        return smoothed(places, extraCost: extraCost)
     }
 
     /// A* over the places, from one to another; the places in order, the first `from`. The search stops at `limit`
@@ -302,7 +309,7 @@ public nonisolated struct NavigationGrid: Sendable {
     /// **Flat buffers, a heap of its own and whole cells for distances, in plain loops** — the collision mesh's way, and
     /// for its reason: an engine runs unoptimised in a game's Debug build, where the first version, with a dictionary,
     /// a heap of tuples and distances in metres, took 5 µs a place.
-    func search(from: Int, to: Int, limit: Int) -> [Int] {
+    func search(from: Int, to: Int, limit: Int, extraCost: ((SIMD3<Float>) -> Float)? = nil) -> [Int] {
         let goalColumn = Int(columnOf[to])
         let gx = goalColumn % columns, gz = goalColumn / columns
         let straight = cellSize, diagonal = cellSize * 1.4142135
@@ -318,6 +325,9 @@ public nonisolated struct NavigationGrid: Sendable {
         var heapKey = [Float](repeating: 0, count: capacity)
         var heapPlace = [Int32](repeating: 0, count: capacity)
         var nearest = from
+        // Each place's extra cost, asked once the first time the search reaches it (-1 not yet asked); none without one.
+        var extra = [Float](repeating: -1, count: extraCost == nil ? 0 : count)
+        extra.withUnsafeMutableBufferPointer { extra in
         cost.withUnsafeMutableBufferPointer { cost in
         came.withUnsafeMutableBufferPointer { came in
         heapKey.withUnsafeMutableBufferPointer { key in
@@ -325,6 +335,11 @@ public nonisolated struct NavigationGrid: Sendable {
         heights.withUnsafeBufferPointer { heights in
         neighbours.withUnsafeBufferPointer { neighbours in
         columnOf.withUnsafeBufferPointer { columnOf in
+            func extraOf(_ k: Int) -> Float {
+                guard let extraCost else { return 0 }
+                if extra[k] < 0 { extra[k] = max(extraCost(position(of: k)), 0) }
+                return extra[k]
+            }
             func estimate(_ k: Int) -> Float {
                 let c = Int(columnOf[k])
                 var dx = c % columns - gx, dz = c / columns - gz
@@ -390,6 +405,8 @@ public nonisolated struct NavigationGrid: Sendable {
                             step -= rise * 0.5
                             if -rise > body.stepHeight { step += 1.5 }
                         }
+                        // Dearer ground costs more for every metre of it: half the step in each place.
+                        if extraCost != nil { step *= 1 + (extraOf(k) + extraOf(n)) * 0.5 }
                         let through = here + step
                         if through < cost[n] {
                             cost[n] = through
@@ -407,6 +424,7 @@ public nonisolated struct NavigationGrid: Sendable {
         }
         }
         }
+        }
         var places = [nearest]
         while let last = places.last, came[last] >= 0 { places.append(Int(came[last])) }
         return places.reversed()
@@ -414,13 +432,24 @@ public nonisolated struct NavigationGrid: Sendable {
 
     /// **The places a body need walk through**: from each, on to the furthest ahead that a straight line reaches over
     /// joined places — a path round a wall as its corners, not a staircase of cells.
-    func smoothed(_ places: [Int]) -> [SIMD3<Float>] {
+    ///
+    /// With an extra cost (``path(from:to:searchLimit:extraCost:)``), a straight run crosses no place dearer than the
+    /// dearest the search went through between its ends — a way the search took round a hazard is not cut back across it.
+    func smoothed(_ places: [Int], extraCost: ((SIMD3<Float>) -> Float)? = nil) -> [SIMD3<Float>] {
         guard places.count > 1 else { return [] }
+        let extra = extraCost.map { cost in places.map { max(cost(position(of: $0)), 0) } }
         var points: [SIMD3<Float>] = []
         var i = 0
         while i < places.count - 1 {
             var j = min(places.count - 1, i + 48)
-            while j > i + 1 && !isStraight(from: places[i], to: places[j]) { j -= 1 }
+            func allowed(_ j: Int) -> Bool {
+                guard let extraCost, let extra else { return isStraight(from: places[i], to: places[j]) }
+                let most = extra[i...j].max() ?? 0
+                return isStraight(from: places[i], to: places[j]) {
+                    max(extraCost(self.position(of: $0)), 0) <= most + 1e-4
+                }
+            }
+            while j > i + 1 && !allowed(j) { j -= 1 }
             points.append(position(of: places[j]))
             i = j
         }
@@ -429,7 +458,9 @@ public nonisolated struct NavigationGrid: Sendable {
 
     /// Whether a straight line from one place reaches another through joined places, never dropping on the way — a drop
     /// is taken where the search put it.
-    func isStraight(from a: Int, to b: Int) -> Bool {
+    ///
+    /// - Parameter crossing: asked of each place the line passes into; false refuses the line.
+    func isStraight(from a: Int, to b: Int, crossing: ((Int) -> Bool)? = nil) -> Bool {
         let pa = position(of: a), pb = position(of: b)
         let across = SIMD2(pb.x - pa.x, pb.z - pa.z)
         let steps = Int(simd_length(across) / (cellSize * 0.4)) + 1
@@ -446,6 +477,7 @@ public nonisolated struct NavigationGrid: Sendable {
                 guard let way = Self.ways.firstIndex(where: { $0.dx == dx && $0.dz == dz }) else { return false }
                 let next = Int(neighbours[current * 8 + way])
                 guard next >= 0, heights[next] >= heights[current] - body.stepHeight else { return false }
+                if let crossing, !crossing(next) { return false }
                 current = next
                 column = here
             }

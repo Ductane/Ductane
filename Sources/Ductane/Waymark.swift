@@ -12,7 +12,7 @@ import simd
 ///
 /// ### The way
 ///
-/// ``way(from:to:grid:surface:searchLimit:)`` finds it: a path over a ``NavigationGrid`` — round walls, up stairs —
+/// ``way(from:to:grid:surface:searchLimit:extraCost:)`` finds it: a path over a ``NavigationGrid`` — round walls, up stairs —
 /// then straight on where the grid ends or no way is found. ``init(way:target:facing:surface:look:)`` makes the mark
 /// from it once, and **it is held for its seconds**: a mark, not a trail that follows the player. Its corners are
 /// rounded off, so it reads as a drawn line rather than the grid's turns.
@@ -216,7 +216,7 @@ public nonisolated struct Waymark: Sendable, Equatable {
     public private(set) var age: Float = 0
 
     /// - Parameters:
-    ///   - way: the points of the way, the first where the player stands (``way(from:to:grid:surface:searchLimit:)``).
+    ///   - way: the points of the way, the first where the player stands (``way(from:to:grid:surface:searchLimit:extraCost:)``).
     ///   - facing: the way the player faces, across the ground — the turn is made when the way starts behind it. Nil
     ///     makes none.
     ///   - surface: the height of what the line lies over at a point across the ground — the ground, or water over it.
@@ -297,13 +297,17 @@ public nonisolated struct Waymark: Sendable, Equatable {
     /// grid, to the furthest point toward it that the grid holds — then straight on to the goal where the path stops
     /// short of it. With no grid, the straight line.
     ///
-    /// - Parameter surface: the ground's height across it, where the straight line toward the goal is tried against the
-    ///   grid's places.
+    /// - Parameters:
+    ///   - surface: the ground's height across it, where the straight line toward the goal is tried against the grid's
+    ///     places.
+    ///   - extraCost: what the way should go round where going round is not much further — see
+    ///     ``NavigationGrid/path(from:to:searchLimit:extraCost:)``.
     public static func way(from start: SIMD3<Float>, to goal: SIMD3<Float>, grid: NavigationGrid?,
-                           surface: (SIMD2<Float>) -> Float, searchLimit: Int = 60_000) -> [SIMD3<Float>] {
+                           surface: (SIMD2<Float>) -> Float, searchLimit: Int = 60_000,
+                           extraCost: ((SIMD3<Float>) -> Float)? = nil) -> [SIMD3<Float>] {
         var points = [start]
         if let grid, let reach = reachable(toward: goal, from: start, in: grid, surface: surface),
-           let path = grid.path(from: start, to: reach, searchLimit: searchLimit) {
+           let path = grid.path(from: start, to: reach, searchLimit: searchLimit, extraCost: extraCost) {
             points += path
         }
         if let last = points.last, simd_distance(SIMD2(last.x, last.z), SIMD2(goal.x, goal.z)) > 0.5 {
