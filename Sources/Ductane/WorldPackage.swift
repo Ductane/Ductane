@@ -44,14 +44,8 @@ public nonisolated struct WorldPackage: Sendable {
         }
         let description = folder.appending(path: Self.descriptionPath)
         guard FileManager.default.fileExists(atPath: description.path) else { throw OpenError.noDescription(url.lastPathComponent) }
-        let world = try WorldFile.read(Data(contentsOf: description))
-        // Every file the description names stays inside the package, as every entry unpacked from it does.
-        let named = world.props + Array(world.collisionShapes.values)
-            + [world.ground?.heights, world.ground?.colours, world.ground?.holes, world.ground?.weights].compactMap { $0 }
-        if let outside = named.first(where: { Self.safePath($0) == nil || $0.hasSuffix("/") }) {
-            throw OpenError.unsafeEntry(outside)
-        }
-        self.world = world
+        // Its paths are checked as it is read (`WorldFile.read`): every file it names stays inside the package.
+        world = try WorldFile.read(Data(contentsOf: description))
     }
 
     /// The app's own caches, in a folder of their own — the container's when sandboxed.

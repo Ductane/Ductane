@@ -214,6 +214,16 @@ struct WorldFileTests {
         #expect(refused { $0.ground = WorldFile.Ground(size: 4, resolution: Int.max / 2) })
         #expect(refused { $0.ground = WorldFile.Ground(size: 4, resolution: 0) })
         #expect(!refused { $0.characters = [1] }, "an index it lists reads")
+        // Every path stays inside the package — props, the ground's files, and textures beside their prop.
+        #expect(refused { $0.props[0] = "../A.usda" })
+        #expect(refused { $0.props[0] = "/Users/someone/A.usda" })
+        #expect(refused { $0.ground?.weights = "game/../../w" })
+        var outside = look
+        outside.noiseTexture = "../../../etc/noise.png"
+        #expect(refused { $0.liquids = [WorldFile.Liquid(prop: 0, material: "M", look: outside)] })
+        let grime = WorldFile.Grime.Look(texture: "/etc/grime.png", colour: .one, intensity: 1, tiling: 1, falloff: 1, albedoTiling: 1)
+        #expect(refused { $0.grime = [WorldFile.Grime(prop: 0, material: "M", look: grime)] })
+        #expect(!refused { $0.liquids = [WorldFile.Liquid(prop: 0, material: "M", look: look)] }, "textures beside the prop read")
         #expect(throws: WorldGroundError.self) {
             try WorldGround(WorldFile.Ground(size: 4, resolution: Int.max / 2), heights: Data(), colours: Data())
         }

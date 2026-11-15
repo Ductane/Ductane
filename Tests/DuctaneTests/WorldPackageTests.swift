@@ -133,7 +133,7 @@ struct WorldPackageTests {
         entries[3].1 = try world.data()
         let naming = work.appending(path: "Naming.usdz")
         try StoredZip.data(entries).write(to: naming)
-        #expect(throws: WorldPackage.OpenError.unsafeEntry("../../outside.f32")) {
+        #expect(throws: WorldFile.ReadError.unsafePath("../../outside.f32")) {
             try WorldPackage(contentsOf: naming, cache: work.appending(path: "Cache"))
         }
         #expect(WorldPackage.safePath("props/1_A/A.usda") == "props/1_A/A.usda")

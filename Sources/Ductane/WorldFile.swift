@@ -596,8 +596,9 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
 
     /// Reads a description, refusing one newer than this engine reads or one whose placements name props it lacks.
     /// **A description is data from anyone**: every index into ``props`` is checked — placements and what they wear,
-    /// characters, effect meshes, liquids, grime, collision shapes, what is walked through — and the ground's grid kept to
-    /// a size its files can hold, so nothing read from it traps or overflows later.
+    /// characters, effect meshes, liquids, grime, collision shapes, what is walked through — the ground's grid kept to a
+    /// size its files can hold, and every path it names kept inside its package, so nothing read from it traps, overflows
+    /// or reaches outside.
     public static func read(_ data: Data) throws -> WorldFile {
         let file = try JSONDecoder().decode(WorldFile.self, from: data)
         guard file.version <= version else { throw ReadError.newer(file.version) }
@@ -609,6 +610,14 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         if let bad = named.first(where: { !file.props.indices.contains($0) }) { throw ReadError.badProp(bad) }
         if let ground = file.ground, !Ground.resolutions.contains(ground.resolution) {
             throw ReadError.badGround(ground.resolution)
+        }
+        // **Every file it names stays inside its package**: props, collision shapes and the ground's files by their paths
+        // in it, liquid and grime textures beside their prop — relative, with no `..` or `.` parts, nothing absolute.
+        let paths = file.props + Array(file.collisionShapes.values)
+            + [file.ground?.heights, file.ground?.colours, file.ground?.holes, file.ground?.weights].compactMap { $0 }
+            + file.liquids.flatMap(\.look.textureFiles) + file.grime.map(\.look.texture)
+        if let outside = paths.first(where: { WorldPackage.safePath($0) == nil || $0.hasSuffix("/") }) {
+            throw ReadError.unsafePath(outside)
         }
         return file
     }
@@ -627,6 +636,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         case wrongWeights(String)
         case badProp(Int)
         case badGround(Int)
+        case unsafePath(String)
         public var description: String {
             switch self {
             case .newer(let v): "the world file is version \(v); this engine reads up to \(WorldFile.version)"
@@ -634,6 +644,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
             case .notWholeTriangles(let bytes): "a collision shape of \(bytes) bytes is not whole triangles (36 bytes each)"
             case .wrongWeights(let path): "\(path) is not eight bytes a point of the ground"
             case .badProp(let p): "the file names prop \(p), which it does not list"
+            case .unsafePath(let path): "the file names \(path), which is not a file inside its package"
             case .badGround(let r): "a ground of \(r) cells a side is not one this engine reads (\(Ground.resolutions))"
             }
         }
