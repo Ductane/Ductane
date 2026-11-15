@@ -65,12 +65,16 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
     /// **What the world sounds like** — loops at places, ambience over areas, sounds now and then, its music (``Sounds``),
     /// played as written by ``Soundscape``. Nil: a silent world.
     public var sounds: Sounds?
+    /// **The world's weather** (``Weather``): cloud, rain or snow, wind, fog and lightning, drawn by ``WeatherRenderer``
+    /// and heard through ``Soundscape``. Nil: a clear sky.
+    public var weather: Weather?
 
     public init(name: String, props: [String], walkedThrough: [Int] = [], collisionShapes: [Int: String] = [:],
                 liquids: [Liquid] = [], characters: [Int] = [], effectMeshes: [String: Int] = [:], grime: [Grime] = [],
                 placements: [Placement], ground: Ground? = nil, sky: Sky = Sky(), lights: [Light] = [],
                 waters: [Water] = [], streams: [Stream] = [], effects: [Effect] = [], markers: [Marker] = [],
-                boundary: WorldBoundary? = nil, waymark: Waymark.Look? = nil, sounds: Sounds? = nil) {
+                boundary: WorldBoundary? = nil, waymark: Waymark.Look? = nil, sounds: Sounds? = nil,
+                weather: Weather? = nil) {
         self.name = name
         self.props = props
         self.walkedThrough = walkedThrough
@@ -90,6 +94,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         self.boundary = boundary
         self.waymark = waymark
         self.sounds = sounds
+        self.weather = weather
     }
 
     /// **What a file leaves out is empty**, not an error: a list or a table not written is none, so a description written
@@ -116,11 +121,13 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         boundary = try c.decodeIfPresent(WorldBoundary.self, forKey: .boundary)
         waymark = try c.decodeIfPresent(Waymark.Look.self, forKey: .waymark)
         sounds = try c.decodeIfPresent(Sounds.self, forKey: .sounds)
+        weather = try? c.decodeIfPresent(Weather.self, forKey: .weather)
     }
 
     private enum CodingKeys: String, CodingKey {
         case version, name, props, walkedThrough, collisionShapes, liquids, characters, effectMeshes, grime, placements,
-             ground, sky, lights, waters, streams, effects, markers, boundary, waymark, sounds
+             ground, sky, lights, waters, streams, effects, markers, boundary, waymark, sounds,
+             weather
     }
 
     // MARK: Markers

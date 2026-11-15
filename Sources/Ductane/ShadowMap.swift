@@ -135,6 +135,8 @@ public nonisolated struct ShadowPass: Sendable, Equatable {
         /// One face of a lamp's cube in ``ShadowCubes``: the caster's ``ShadowCubes/Caster/slot`` and the
         /// face, `0..<6` in the order `+X, −X, +Y, −Y, +Z, −Z`.
         case cubeFace(slot: Int, face: Int)
+        /// ``WeatherCover``'s look straight down: what keeps rain and snow out from under a roof.
+        case cover
     }
 
     public let target: Target

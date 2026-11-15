@@ -33,7 +33,21 @@ public final class Soundscape {
     private var variation = SoundVariation(pitchSpread: 0, gainSpreadDecibels: 2)
     private var random: SoundRandom
     private var listener = SIMD3<Float>.zero
+    private var forward = SIMD3<Float>(0, 0, -1)
     private var isPaused = false
+
+    // MARK: The weather
+
+    /// **The weather heard**, and the time on the clock it is drawn by — ``setWeather(_:at:)``.
+    public private(set) var weather: Weather?
+    public private(set) var weatherTime: Double = 0
+    /// The rain and wind beds playing, with the file each plays.
+    private var rainBed: (loop: AudioEngine.Loop, file: String)?
+    private var windBed: (loop: AudioEngine.Loop, file: String)?
+    /// Strikes up to this time have had their thunder sent on its way.
+    private var heardUntil: Double?
+    /// Thunder on its way: when it arrives, which file, how loud, and from which way.
+    private var thunders: [(at: Double, file: String, volume: Float, from: SIMD3<Float>)] = []
 
     /// - Parameter seed: where the scattered sounds' timing and places start — fixed, a run sounds the same twice.
     public init(audio: AudioEngine, music: MusicPlayer? = nil, seed: UInt64 = 0x5EED) {
@@ -89,6 +103,7 @@ public final class Soundscape {
             }
         }
         refresh()
+        refreshWeather()
     }
 
     /// Where each file is, as ``play(_:file:)`` was told — what the music's player opens.
@@ -101,11 +116,82 @@ public final class Soundscape {
     /// **Where the ears are, and how long since the last call** — once a frame.
     public func update(listener position: SIMD3<Float>, forward: SIMD3<Float>, up: SIMD3<Float>, elapsed seconds: Float) {
         listener = position
+        self.forward = forward
         audio.updateListener(position: position, forward: forward, up: up)
         guard !isPaused else { return }
         refresh()
         scatter(elapsed: max(seconds.isFinite ? seconds : 0, 0))
+        thunder()
     }
+
+    /// **The weather to hear, and the time on its clock** — the one lightning is drawn by, so a flash and its thunder
+    /// agree. Once a frame, before ``update(listener:forward:up:elapsed:)``; nil for none. Its files are
+    /// ``WorldFile/Sounds/weather``'s.
+    public func setWeather(_ weather: Weather?, at time: Double) {
+        if time < weatherTime || weather?.seed != self.weather?.seed {
+            heardUntil = nil
+            thunders = []
+        }
+        self.weather = weather
+        weatherTime = time.isFinite ? time : weatherTime
+        refreshWeather()
+    }
+
+    /// Sets the rain and wind beds to how heavy the weather is.
+    private func refreshWeather() {
+        guard !isPaused else { return }
+        let sounds = self.sounds.weather
+        let volume = sounds?.volume ?? 0
+        func bed(_ playing: inout (loop: AudioEngine.Loop, file: String)?, file index: Int?, level: Float) {
+            let path = index.flatMap(file(of:))
+            if let current = playing, current.file != path || level <= 0 {
+                audio.stopLoop(current.loop)
+                playing = nil
+            }
+            guard level > 0, let path else { return }
+            if let current = playing {
+                audio.setAmbienceVolume(current.loop, to: level)
+            } else if let loop = audio.startAmbience(path, volume: level) {
+                playing = (loop, path)
+            }
+        }
+        bed(&rainBed, file: sounds?.rain, level: (weather?.rainVolume ?? 0) * volume)
+        bed(&windBed, file: sounds?.wind, level: (weather?.windVolume ?? 0) * volume)
+    }
+
+    /// **Sends each new strike's thunder on its way**, and plays what has arrived: from the strike's direction, as loud
+    /// as its distance allows, as long after the strike as sound takes to get here.
+    private func thunder() {
+        guard let weather, let takes = sounds.weather?.thunder, !takes.isEmpty else {
+            heardUntil = weatherTime
+            thunders = []
+            return
+        }
+        // After a long pause only the last few seconds' strikes are still on their way.
+        let from = max(heardUntil ?? weatherTime, weatherTime - 15)
+        for strike in weather.strikes(from: from, to: weatherTime + 1e-9) where strike.time > from || heardUntil == nil {
+            let take = variation.take(for: "thunder", among: takes.count, using: &random)
+            guard let path = file(of: takes[take]) else { continue }
+            var way = SIMD3(strike.position.x - listener.x, 0, strike.position.y - listener.z)
+            way = simd_length(way) > 1 ? simd_normalize(way) : SIMD3(0, 0, -1)
+            thunders.append((strike.time + strike.thunderDelay(heardFrom: listener), path,
+                             strike.thunderVolume(heardFrom: listener) * (sounds.weather?.volume ?? 1), way))
+        }
+        heardUntil = weatherTime
+        let arrived = thunders.filter { $0.at <= weatherTime }
+        thunders.removeAll { $0.at <= weatherTime }
+        for clap in arrived where weatherTime - clap.at < 2 {
+            // Heard from its direction, high and some way off: placed at its real distance it would be past any reach.
+            audio.playAmbient(clap.file, at: listener + clap.from * Self.thunderDistance + SIMD3(0, 25, 0),
+                              volume: min(clap.volume, 1), reach: Self.thunderDistance * 4)
+        }
+    }
+
+    /// How far off thunder is placed, metres — only for which way it comes from.
+    static let thunderDistance: Float = 60
+
+    /// Thunder on its way and not yet heard — for a test.
+    var thundersOnTheirWay: Int { thunders.count }
 
     /// Starts the loops come within reach and stops those left behind, and sets each ambience by where the ears are.
     private func refresh() {
@@ -189,7 +275,7 @@ public final class Soundscape {
     }
 
     /// Loops and beds playing — for a test, or a game's statistics.
-    public var playingCount: Int { points.count + beds.count }
+    public var playingCount: Int { points.count + beds.count + (rainBed == nil ? 0 : 1) + (windBed == nil ? 0 : 1) }
 
     /// **Holds the world's sound** — under a menu, in a paused editor — stopping every loop and bed; ``resume()`` starts
     /// what is in reach again. The music is held too, when it is the world's.
@@ -219,8 +305,12 @@ public final class Soundscape {
     private func stopLoops() {
         for playing in points.values { audio.stopLoop(playing.loop) }
         for playing in beds.values { audio.stopLoop(playing.loop) }
+        for playing in [rainBed, windBed].compactMap({ $0 }) { audio.stopLoop(playing.loop) }
         points = [:]
         beds = [:]
+        rainBed = nil
+        windBed = nil
+        thunders = []
     }
 }
 

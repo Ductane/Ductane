@@ -21,19 +21,24 @@ extension WorldFile {
         public var ambiences: [Ambience]
         public var scattered: [Scattered]
         public var music: Music?
+        /// **What the weather sounds like**: rain and wind beds as loud as the weather is heavy, and thunder after each
+        /// strike (``Weather``). Nil: the weather is silent.
+        public var weather: WeatherSounds?
 
         public init(files: [String] = [], points: [Point] = [], ambiences: [Ambience] = [], scattered: [Scattered] = [],
-                    music: Music? = nil) {
+                    music: Music? = nil, weather: WeatherSounds? = nil) {
             self.files = files
             self.points = points
             self.ambiences = ambiences
             self.scattered = scattered
             self.music = music
+            self.weather = weather
         }
 
         /// Whether it plays nothing.
         public var isEmpty: Bool {
             points.isEmpty && ambiences.isEmpty && scattered.isEmpty && (music?.tracks.isEmpty ?? true)
+                && (weather?.isEmpty ?? true)
         }
 
         /// **A loop at a place** — a generator's hum, a fire, a drip: full near it, gone at its reach (``SoundReach``).
@@ -107,9 +112,43 @@ extension WorldFile {
             }
         }
 
+        /// **The weather's sounds**: a rain loop and a wind loop, each heard in both ears as loud as ``Weather/rainVolume``
+        /// and ``Weather/windVolume`` say, and thunder — one of ``thunder`` at a time — arriving from each strike as long
+        /// after it as sound takes to cover the distance (``Weather/Strike/thunderDelay(heardFrom:)``).
+        public struct WeatherSounds: Codable, Equatable, Sendable {
+            /// Indices into ``Sounds/files``.
+            public var rain: Int?
+            public var wind: Int?
+            /// The takes thunder picks from.
+            public var thunder: [Int]
+            /// 0…1: how loud all of it is at its heaviest.
+            public var volume: Float
+
+            public init(rain: Int? = nil, wind: Int? = nil, thunder: [Int] = [], volume: Float = 0.8) {
+                self.rain = rain
+                self.wind = wind
+                self.thunder = thunder
+                self.volume = min(max(volume, 0), 1)
+            }
+
+            public var isEmpty: Bool { rain == nil && wind == nil && thunder.isEmpty }
+
+            /// What a file leaves out is none.
+            public init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                self.init(rain: try c.decodeIfPresent(Int.self, forKey: .rain),
+                          wind: try c.decodeIfPresent(Int.self, forKey: .wind),
+                          thunder: try c.decodeIfPresent([Int].self, forKey: .thunder) ?? [],
+                          volume: try c.decodeIfPresent(Float.self, forKey: .volume) ?? 0.8)
+            }
+
+            private enum CodingKeys: String, CodingKey { case rain, wind, thunder, volume }
+        }
+
         /// Every index into ``files`` the sounds name — what reading checks.
         var named: [Int] {
             points.map(\.sound) + ambiences.map(\.sound) + scattered.flatMap(\.sounds) + (music?.tracks ?? [])
+                + [weather?.rain, weather?.wind].compactMap { $0 } + (weather?.thunder ?? [])
         }
 
         /// What a file leaves out is empty.
@@ -120,9 +159,10 @@ extension WorldFile {
             ambiences = try c.decodeIfPresent([Ambience].self, forKey: .ambiences) ?? []
             scattered = try c.decodeIfPresent([Scattered].self, forKey: .scattered) ?? []
             music = try c.decodeIfPresent(Music.self, forKey: .music)
+            weather = try c.decodeIfPresent(WeatherSounds.self, forKey: .weather)
         }
 
-        private enum CodingKeys: String, CodingKey { case files, points, ambiences, scattered, music }
+        private enum CodingKeys: String, CodingKey { case files, points, ambiences, scattered, music, weather }
     }
 }
 
