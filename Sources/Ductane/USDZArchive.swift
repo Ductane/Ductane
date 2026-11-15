@@ -7,7 +7,7 @@ import Foundation
 /// central directory, and nothing needs decompressing. A compressed entry is not a valid package and is
 /// refused rather than read wrong.
 ///
-/// Used by ``TextureStore`` for a texture packed inside a `.usdz`: Model I/O names it
+/// Used by ``WorldPackage`` to unpack a scene package, and by ``TextureStore`` for a texture packed inside a `.usdz`: Model I/O names it
 /// `Prop.usdz[textures/x.png]` while its URL is the package itself (see `MDLMaterialProperty.textureSource`).
 nonisolated enum USDZArchive {
     enum ReadError: Error, CustomStringConvertible {
@@ -27,6 +27,17 @@ nonisolated enum USDZArchive {
     /// The bytes of the entry named `name` (its path inside the package).
     static func entry(_ name: String, in url: URL) throws -> Data {
         let data = try Data(contentsOf: url, options: .alwaysMapped)
+        guard let range = try ranges(in: data, stoppingAt: name)[name] else { throw ReadError.missing(name) }
+        return data.subdata(in: range)
+    }
+
+    /// **Every entry of a package**, by its path inside it, as byte ranges of `data` — the package's bytes, mapped.
+    static func entries(in data: Data) throws -> [String: Range<Data.Index>] {
+        try ranges(in: data, stoppingAt: nil)
+    }
+
+    /// The entries' byte ranges, through the central directory; with `name`, only up to and including that one.
+    private static func ranges(in data: Data, stoppingAt name: String?) throws -> [String: Range<Data.Index>] {
         // The end-of-central-directory record is the last thing in the file, followed by a comment of at most
         // 64 KB, so it is searched for backwards from the end.
         let minimum = 22
@@ -42,6 +53,7 @@ nonisolated enum USDZArchive {
 
         let count = Int(data.u16(end + 10))
         var at = Int(data.u32(end + 16))
+        var found: [String: Range<Data.Index>] = [:]
         for _ in 0..<count {
             guard at + 46 <= data.count, data.u32(at) == 0x0201_4B50 else { throw ReadError.notAZip }
             let method = data.u16(at + 10)
@@ -55,18 +67,19 @@ nonisolated enum USDZArchive {
             guard at + 46 + nameLength + extraLength + commentLength <= data.count else { throw ReadError.notAZip }
             let entryName = String(decoding: data[(data.startIndex + at + 46)..<(data.startIndex + at + 46 + nameLength)],
                                    as: UTF8.self)
-            if entryName == name {
-                guard method == 0 else { throw ReadError.compressed(name) }
+            if name == nil || entryName == name {
+                guard method == 0 else { throw ReadError.compressed(entryName) }
                 // The local header has its own name and extra-field lengths; the extra field is where the
                 // alignment padding goes, so it is usually not the central directory's.
                 guard localHeader + 30 <= data.count, data.u32(localHeader) == 0x0403_4B50 else { throw ReadError.notAZip }
                 let start = localHeader + 30 + Int(data.u16(localHeader + 26)) + Int(data.u16(localHeader + 28))
                 guard start + size <= data.count else { throw ReadError.notAZip }
-                return data.subdata(in: (data.startIndex + start)..<(data.startIndex + start + size))
+                found[entryName] = (data.startIndex + start)..<(data.startIndex + start + size)
+                if name != nil { return found }
             }
             at += 46 + nameLength + extraLength + commentLength
         }
-        throw ReadError.missing(name)
+        return found
     }
 }
 
