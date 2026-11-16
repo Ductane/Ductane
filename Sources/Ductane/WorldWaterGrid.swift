@@ -23,6 +23,12 @@ public nonisolated struct WorldWaterGrid: Sendable {
         self.cell = max(cell, 0.01)
         top = rectangles.map(\.level).max() ?? -.infinity
         for (index, r) in rectangles.enumerated() {
+            // **Water from anyone's file**: a rectangle that is not finite, or wider than any world, is filed nowhere —
+            // it could trap the conversion to a cell, or file itself in billions of cells.
+            let edges = [r.level, r.rectangle.x, r.rectangle.y, r.rectangle.z, r.rectangle.w]
+            guard edges.allSatisfy(\.isFinite),
+                  (r.rectangle.z - r.rectangle.x) / self.cell <= Self.widest,
+                  (r.rectangle.w - r.rectangle.y) / self.cell <= Self.widest else { continue }
             let lo = key(r.rectangle.x, r.rectangle.y), hi = key(r.rectangle.z, r.rectangle.w)
             for x in lo.x...max(lo.x, hi.x) {
                 for z in lo.y...max(lo.y, hi.y) { cells[SIMD2(x, z), default: []].append(Int32(index)) }
@@ -30,13 +36,20 @@ public nonisolated struct WorldWaterGrid: Sendable {
         }
     }
 
+    /// Cells a rectangle may span a side: a 16 km world at the default cell.
+    static let widest: Float = 1_024
+
+    /// The cell a point is in — kept far inside `Int32`, so no point's coordinates can trap the conversion.
     private func key(_ x: Float, _ z: Float) -> SIMD2<Int32> {
-        SIMD2(Int32((x / cell).rounded(.down)), Int32((z / cell).rounded(.down)))
+        func cellOf(_ v: Float) -> Int32 {
+            Int32(min(max((v / cell).rounded(.down), -1_000_000_000), 1_000_000_000))
+        }
+        return SIMD2(cellOf(x.isFinite ? x : 0), cellOf(z.isFinite ? z : 0))
     }
 
     /// Whether `point` is below the level of a rectangle it stands over.
     public func covers(_ point: SIMD3<Float>) -> Bool {
-        guard point.y < top, let candidates = cells[key(point.x, point.z)] else { return false }
+        guard point.x.isFinite, point.z.isFinite, point.y < top, let candidates = cells[key(point.x, point.z)] else { return false }
         for index in candidates {
             let (level, r) = rectangles[Int(index)]
             if point.y < level && point.x >= r.x && point.x <= r.z && point.z >= r.y && point.z <= r.w { return true }

@@ -108,6 +108,18 @@ struct WorldRendererTests {
         #expect(near.map(\.position.x) == [3, 50])
     }
 
+    @Test("Ground fog's floor takes water from anyone's file without trapping: bad rectangles are skipped, far ones kept on the grid")
+    func fogFloorFromUntrustedWater() {
+        let heights = [Float](repeating: 0, count: 9)
+        let water = WorldFile.Water(level: 1, colour: .zero, opacity: 1, rectangles: [
+            SIMD4(.nan, 0, 1, 1), SIMD4(-.infinity, -1e30, .infinity, 1e30), SIMD4(-1e38, -1e38, 1e38, 1e38)])
+        let floor = FogFloor(heights: heights, resolution: 2, size: 4, waters: [water])
+        let open = FogFloor(heights: heights, resolution: 2, size: 4, waters: [])
+        #expect(floor != open, "the far rectangle, kept on the grid, covers it")
+        _ = FogFloor(heights: heights, resolution: 2, size: 4,
+                     waters: [WorldFile.Water(level: .nan, colour: .zero, opacity: 1, rectangles: [SIMD4(-1, -1, 1, 1)])])
+    }
+
     @Test("The sky on a world's clock keeps the hour set unless it runs")
     func skyOnTheClock() {
         var sky = WorldFile.Sky(timeOfDay: 9)

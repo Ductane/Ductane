@@ -213,9 +213,12 @@ public nonisolated extension FogFloor {
         let n = resolution + 1, spacing = size / Float(resolution), half = size / 2
         var water = [Float?](repeating: nil, count: n * n)
         for body in waters {
-            for r in body.rectangles where r.count == 4 {
-                let x0 = max(Int(((r[0] + half) / spacing).rounded()), 0), x1 = min(Int(((r[2] + half) / spacing).rounded()), n - 1)
-                let z0 = max(Int(((r[1] + half) / spacing).rounded()), 0), z1 = min(Int(((r[3] + half) / spacing).rounded()), n - 1)
+            // **A world file is data from anyone**: a rectangle that is not four finite numbers is skipped, and each edge is
+            // kept on the grid before it becomes a point's index, so no value can trap the conversion.
+            guard body.level.isFinite else { continue }
+            for r in body.rectangles where r.count == 4 && r.allSatisfy(\.isFinite) {
+                func point(_ v: Float) -> Int { Int(min(max(((v + half) / spacing).rounded(), 0), Float(n - 1))) }
+                let x0 = point(r[0]), x1 = point(r[2]), z0 = point(r[1]), z1 = point(r[3])
                 guard x0 <= x1, z0 <= z1 else { continue }
                 for z in z0...z1 {
                     for x in x0...x1 { water[z * n + x] = max(water[z * n + x] ?? -.infinity, body.level) }

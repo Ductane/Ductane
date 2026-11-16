@@ -32,4 +32,13 @@ struct WorldWaterGridTests {
         #expect(under > 100, "the check ran over water as well as off it")
         #expect(!WorldWaterGrid([]).covers(SIMD3(0, -10, 0)), "no water, nothing under it")
     }
+
+    @Test("Water from anyone's file is filed without trapping or filling billions of cells")
+    func untrustedRectangles() {
+        let grid = WorldWaterGrid([(1, SIMD4(.nan, 0, 1, 1)), (.infinity, SIMD4(0, 0, 1, 1)),
+                                   (1, SIMD4(-1e38, -1e38, 1e38, 1e38)), (1, SIMD4(2, 2, 4, 4))], cell: 16)
+        #expect(grid.covers(SIMD3(3, 0, 3)), "the good rectangle still answers")
+        #expect(!grid.covers(SIMD3(500, 0, 500)), "the world-sized one was filed nowhere")
+        #expect(!grid.covers(SIMD3(.nan, 0, 3)))
+    }
 }
