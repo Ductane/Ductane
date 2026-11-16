@@ -169,9 +169,14 @@ vertex DUWeatherOut duWeatherSplashVertex(uint vid [[vertex_id]], uint iid [[ins
     const float life = fract(cycle);
     const float3 h = duWeatherHash3(iid * 131u + round * 7919u);
     const float reach = f.screen.z;
-    // Evenly over a disc round the eye.
-    const float angle = h.x * 6.2831853, radius = sqrt(h.y) * reach;
-    float3 at = float3(f.eye.x + cos(angle) * radius, f.eye.y, f.eye.z + sin(angle) * radius);
+    // **Where it lands is fixed in the world**: a place in a square of the world, the square repeated so the one round
+    // the eye holds it — so a splash stays where its drop hit while the eye moves on, and only one at the far edge,
+    // already faded, ever moves to the other side.
+    const float tile = reach * 2.0;
+    const float2 local = h.xy * tile;
+    const float2 place = local + tile * floor((f.eye.xz - local) / tile + 0.5);
+    float3 at = float3(place.x, f.eye.y, place.y);
+    const float radius = distance(place, f.eye.xz);
     at.y = duWeatherCover(at, f, cover);
     const bool none = at.y < f.eye.y - 40.0 || at.y > f.eye.y + 20.0;
     const float size = 0.03 + 0.09 * life;

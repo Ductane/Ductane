@@ -230,6 +230,83 @@ struct WeatherTests {
         return (p.reduce(0) { $0 + Int($1) }, game.drew)
     }
 
+    /// Rain over flat ground under a cover, seen straight down from a camera that stays put while `eye` — where the
+    /// drops and splashes are made round — is wherever it is given.
+    private final class Splashes: GameLoop {
+        let renderer: WeatherRenderer
+        let cover: WeatherCover
+        let eye: SIMD3<Float>
+        init(_ renderer: WeatherRenderer, _ cover: WeatherCover, eye: SIMD3<Float>) {
+            self.renderer = renderer
+            self.cover = cover
+            self.eye = eye
+        }
+        func beginFrame() {}
+        func step(deltaTime: Float) {}
+        func viewportSizeChanged(width: Int, height: Int) {}
+        func encodePrePasses(into commandBuffer: MTL4CommandBuffer, frameSlot: Int, interpolation: Float) {
+            cover.update(around: eye)
+            // Flat ground at height 0 everywhere: the depth that reads back as it.
+            let descriptor = MTL4RenderPassDescriptor()
+            let attachment = MTLRenderPassDepthAttachmentDescriptor()
+            attachment.texture = cover.texture
+            attachment.loadAction = .clear
+            attachment.clearDepth = Double(1 - (cover.top - 0) / WeatherCover.depthRange)
+            attachment.storeAction = .store
+            descriptor.depthAttachment = attachment
+            commandBuffer.makeRenderCommandEncoder(descriptor: descriptor)?.endEncoding()
+        }
+        func encode(into encoder: MTL4RenderCommandEncoder, frameSlot: Int, interpolation: Float) {
+            let camera = SIMD3<Float>(0, 6, 0)
+            let view = Camera(position: camera, yaw: 0, pitch: -Camera.pitchLimit).viewMatrix
+            let projection = simd_float4x4(perspectiveFovY: 70 * .pi / 180, aspectRatio: 1, nearZ: 0.1)
+            let weather = Weather(kind: .rain, severity: 1)
+            renderer.draw(weather, into: encoder, frameSlot: frameSlot, viewProjection: projection * view, eye: eye,
+                          time: 3.1, lighting: weather.lighting(DaySky(timeOfDay: 12).lighting), cover: cover,
+                          pixelAngle: 1.2 / 256, brightness: 8)
+        }
+        func encodeHUD(into encoder: MTL4RenderCommandEncoder, frameSlot: Int, interpolation: Float) {}
+    }
+
+    @MainActor
+    private func splashPixels(eye: SIMD3<Float>, device: MTLDevice) throws -> Set<Int> {
+        let frames = try FrameRenderer(device: device)
+        let renderer = try WeatherRenderer(device: device, sampleCount: frames.effectiveSampleCount)
+        let cover = try WeatherCover(device: device)
+        frames.residencySet.addAllocations(renderer.allocations)
+        frames.residencySet.addAllocations(cover.allocations)
+        let game = Splashes(renderer, cover, eye: eye)
+        frames.game = game
+        let size = 256
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: FrameRenderer.colorPixelFormat,
+                                                                  width: size, height: size, mipmapped: false)
+        descriptor.usage = .renderTarget
+        descriptor.storageMode = .shared
+        let target = try #require(device.makeTexture(descriptor: descriptor))
+        frames.residencySet.addAllocation(target)
+        frames.commitResidency()
+        frames.render(into: target)
+        var p = [UInt8](repeating: 0, count: size * size * 4)
+        target.getBytes(&p, bytesPerRow: size * 4, from: MTLRegionMake2D(0, 0, size, size), mipmapLevel: 0)
+        let background = p[0..<4].map(Int.init)
+        var lit = Set<Int>()
+        for i in 0..<(size * size) where (0..<3).contains(where: { abs(Int(p[i * 4 + $0]) - background[$0]) > 6 }) {
+            lit.insert(i)
+        }
+        return lit
+    }
+
+    @Test("A splash stays where its drop landed while the eye moves on")
+    @MainActor
+    func splashesStay() throws {
+        guard let device = MTLCreateSystemDefaultDevice(), device.supportsFamily(.metal4) else { return }
+        let a = try splashPixels(eye: SIMD3(0, 1.7, 0), device: device)
+        let b = try splashPixels(eye: SIMD3(0.5, 1.7, 0.3), device: device)
+        #expect(a.count > 200, "something drew: \(a.count)")
+        let overlap = Double(a.intersection(b).count) / Double(max(a.union(b).count, 1))
+        #expect(overlap > 0.6, "the same pixels with the eye half a metre on: \(overlap), \(a.count) and \(b.count) lit")
+    }
+
     @Test("Rain and snow draw over the scene; a clear sky draws nothing")
     @MainActor
     func draws() throws {
