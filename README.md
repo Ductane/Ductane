@@ -53,6 +53,15 @@ swift run DuctaneSample
 
 Each has a guide in the [documentation](https://ductane.com/docs/start.html).
 
+## Tools
+
+Two Mac apps are built on the engine; neither is needed to use it.
+
+- **[Worldra](https://worldra.app)** lays out worlds from environment packs. Its export is a world your game opens with
+  `WorldPackage`. ([App Store](https://apps.apple.com/app/worldra/id6813750881))
+- **[Rigkin](https://rigkin.com)** builds characters from modular parts and exports them rigged and animated, as USD or
+  glTF. ([App Store](https://apps.apple.com/app/rigkin/id6812976038))
+
 ## Tests
 
 ```bash
