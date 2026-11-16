@@ -25,6 +25,8 @@ public final class SkyPass {
         var starRow2: SIMD4<Float>
         var clouds: SIMD4<Float>
         var cloudDrift: SIMD4<Float>
+        var aurora: SIMD4<Float>
+        var rainbow: SIMD4<Float>
     }
     static let stride = (MemoryLayout<Uniforms>.stride + 255) & ~255
 
@@ -102,7 +104,7 @@ public final class SkyPass {
     /// when given; `time` (seconds) twinkles the stars.
     public func encode(into encoder: MTL4RenderCommandEncoder, frameSlot: Int, viewProjection: simd_float4x4,
                        eye: SIMD3<Float>, lighting: DaySky.Lighting, night: NightSky? = nil, clouds: Clouds? = nil,
-                       time: Float = 0) {
+                       time: Float = 0, rainbow: Float = 0) {
         // Without a night sky, the disc is drawn where the light comes from, as it always was.
         let sun = night.map { SIMD4($0.sun, $0.sun.y > -0.02 ? 1 : 0) } ?? SIMD4(lighting.direction, 1)
         let rotation = night?.starRotation ?? matrix_identity_float3x3
@@ -117,7 +119,9 @@ public final class SkyPass {
                               starRow1: SIMD4(rotation.transpose.columns.1, 0),
                               starRow2: SIMD4(rotation.transpose.columns.2, 0),
                               clouds: layer.map { SIMD4($0.coverage, $0.darkness, $0.base, $0.thickness) } ?? .zero,
-                              cloudDrift: layer.map { SIMD4($0.drift.x, $0.drift.y, 0, 0) } ?? .zero)
+                              cloudDrift: layer.map { SIMD4($0.drift.x, $0.drift.y, 0, 0) } ?? .zero,
+                              aurora: night.map { SIMD4($0.pole, $0.aurora) } ?? .zero,
+                              rainbow: SIMD4(night == nil ? 0 : max(rainbow, 0), 0, 0, 0))
         let offset = frameSlot * Self.stride
         uniforms.contents().advanced(by: offset).copyMemory(from: &values, byteCount: MemoryLayout<Uniforms>.size)
         encoder.setRenderPipelineState(pipeline)

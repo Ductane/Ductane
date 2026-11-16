@@ -278,3 +278,53 @@ vertex DUWeatherOut duWeatherDripSplashVertex(uint vid [[vertex_id]], uint iid [
     if (!landed) out.position = float4(0, 0, -1, 1);
     return out;
 }
+
+// MARK: - Lightning
+
+/// One piece of a bolt, as `WeatherRenderer.drawLightning` writes it: its ends, w how wide (metres) and how bright.
+struct DUBoltSegment {
+    float4 a;   // xyz; w how wide, metres
+    float4 b;   // xyz; w how bright, 0…1, with the strike's flicker in it
+};
+
+struct DUBoltOut {
+    float4 position [[position]];
+    float across;      // −1…1 across the ribbon, its glow wider than its core
+    float brightness;
+};
+
+/// **A bolt's piece as a ribbon facing the eye**, six times as wide as its core so the glow round it fits, never under two
+/// pixels; dimmed by the fog between it and the eye, never to nothing.
+vertex DUBoltOut duBoltVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
+                              constant DUWeatherFrame &f [[buffer(0)]],
+                              const device DUBoltSegment *segments [[buffer(1)]])
+{
+    const DUBoltSegment s = segments[iid];
+    const float3 a = s.a.xyz, b = s.b.xyz;
+    const float3 middle = (a + b) * 0.5;
+    const float3 toEye = f.eye.xyz - middle;
+    const float distance = length(toEye);
+    float3 side = cross(b - a, toEye);
+    side = length(side) > 1e-5 ? normalize(side) : float3(1, 0, 0);
+    // At least two pixels wide for the core, so a bolt kilometres off still reads.
+    const float width = max(s.a.w, distance * f.screen.x * 2.0) * 6.0;
+    const float2 corners[6] = { float2(-1, 0), float2(1, 0), float2(1, 1), float2(-1, 0), float2(1, 1), float2(-1, 1) };
+    const float2 c = corners[vid];
+    const float3 p = mix(a, b, c.y) + side * c.x * width * 0.5;
+    const float fog = f.screen.y * distance;
+    DUBoltOut out;
+    out.position = f.viewProjection * float4(p, 1.0);
+    out.across = c.x;
+    out.brightness = s.b.w * max(exp(-fog * fog), 0.25);
+    return out;
+}
+
+/// A white-violet core and a soft glow round it, added to what is behind.
+fragment float4 duBoltFragment(DUBoltOut in [[stage_in]])
+{
+    const float x = in.across * 6.0;
+    const float core = exp(-x * x * 2.0);
+    const float glow = exp(-x * x * 0.12) * 0.12;
+    const float3 colour = float3(0.78, 0.84, 1.0) * (core * 60.0 + glow * 20.0) * in.brightness;
+    return float4(colour, 0.0);
+}

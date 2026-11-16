@@ -146,6 +146,8 @@ struct SkyUniforms {
     float4 starRow2;
     float4 clouds;       // x coverage, y darkness, z base, w thickness
     float4 cloudDrift;   // xy metres
+    float4 aurora;       // xyz toward the pole it hangs over, level; w how strong tonight
+    float4 rainbow;      // x how strong
 };
 
 struct SkyOut {
@@ -210,6 +212,42 @@ static float3 starLight(float3 s, float time) {
     return colour;
 }
 
+/// **A rainbow** (Ductane's `Weather.rainbow`): the bow 42° from the point opposite the sun — red outside, violet
+/// in — and a fainter second bow at 51°, its colours the other way round, with the sky a little brighter inside the first.
+static float3 rainbowLight(float3 dir, float3 sun, float strength) {
+    float angle = acos(clamp(dot(dir, -sun), -1.0, 1.0)) * 57.29578;
+    float3 colour = 0;
+    // Across a bow, 0 violet … 1 red.
+    float t1 = (angle - 40.4) / 2.0, t2 = (53.6 - angle) / 3.0;
+    for (int k = 0; k < 2; k++) {
+        float t = k == 0 ? t1 : t2;
+        if (t < -0.2 || t > 1.2) continue;
+        float edge = smoothstep(-0.2, 0.1, t) * (1.0 - smoothstep(0.9, 1.2, t));
+        float hue = (1.0 - saturate(t)) * 0.78;
+        float3 rgb = saturate(abs(fract(hue + float3(0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0);
+        colour += rgb * edge * (k == 0 ? 1.0 : 0.35);
+    }
+    colour += float3(1.0) * 0.08 * (1.0 - smoothstep(30.0, 40.5, angle));
+    return colour * strength * 0.12 * smoothstep(-0.02, 0.05, dir.y);
+}
+
+/// **The aurora** (Ductane's `DaySky.auroraStrength`): curtains hanging toward the pole, green below and violet at
+/// their tops, rayed and slowly folding as they drift, low in the sky at mid-latitudes and higher toward the poles.
+static float3 auroraLight(float3 dir, float3 pole, float strength, float time) {
+    if (strength <= 0.0 || dir.y < 0.02) return 0;
+    float2 h = normalize(dir.xz + 1e-5);
+    float facing = dot(h, normalize(pole.xz));
+    float azimuth = atan2(h.y, h.x);
+    float fold = skyNoise(float3(azimuth * 2.5 + time * 0.015, 0.0, 3.0));
+    float bottom = 0.12 + 0.08 * sin(azimuth * 3.0 + time * 0.02) + 0.06 * fold;
+    float band = smoothstep(bottom, bottom + 0.06, dir.y) * (1.0 - smoothstep(bottom + 0.25, bottom + 0.55, dir.y));
+    float rays = pow(skyNoise(float3(azimuth * 40.0, time * 0.12, 7.0)), 2.0);
+    float toward = smoothstep(-0.3, 0.6, facing);
+    float rise = saturate((dir.y - bottom) / 0.5);
+    float3 colour = mix(float3(0.15, 1.0, 0.4), float3(0.6, 0.15, 0.7), smoothstep(0.35, 0.95, rise));
+    return colour * band * toward * (0.35 + 1.4 * rays) * (0.5 + fold) * strength * 0.35;
+}
+
 /// **The moon**, where the eye looks at it: its disc a degree and a quarter across, lit on the side facing the sun — its
 /// phase — with faint earthshine on the rest and a little mottling of seas. Nothing elsewhere.
 static float3 moonLight(float3 dir, float3 moon, float3 sun) {
@@ -242,6 +280,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]], constant SkyUniforms &sky [[
         beyond += starLight(transpose(turn) * direction, sky.night.z) * sky.night.x * smoothstep(0.0, 0.12, up);
     }
     beyond += moonLight(direction, sky.moon.xyz, sky.sun.xyz) * above;
+    beyond += auroraLight(direction, sky.aurora.xyz, sky.aurora.w, sky.night.z) * smoothstep(0.0, 0.1, up);
     if (sky.sun.w > 0.5) {
         float disc = smoothstep(0.9995, 0.9998, dot(direction, sky.sun.xyz));
         beyond += sky.sunColour.rgb * disc * 4;
@@ -266,5 +305,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]], constant SkyUniforms &sky [[
         cloudLight = (sky.sunColour.rgb * 0.3 * shade + mix(sky.horizon.rgb, sky.zenith.rgb, 0.5)) * dark * a;
         through = 1.0 - a;
     }
-    return float4((colour + beyond) * through + cloudLight, 1);
+    // A rainbow forms in the rain in front of the clouds, not behind them.
+    float3 bow = sky.rainbow.x > 0.0 ? rainbowLight(direction, sky.sun.xyz, sky.rainbow.x) : float3(0);
+    return float4((colour + beyond) * through + cloudLight + bow * (sky.sunColour.rgb / max(max(sky.sunColour.r, sky.sunColour.g), 0.05)), 1);
 }

@@ -110,6 +110,19 @@ public nonisolated struct GraphicsSettings: Equatable, Sendable, Codable {
     /// **How clouds are drawn** (``CloudPass``): volumetric at full or reduced detail, or a flat layer. Low draws the flat
     /// layer.
     public var clouds: CloudQuality = .high
+    /// **How fog is drawn** (``VolumetricFog``): volumetric — sun shafts, ground fog, lights glowing in it — in finer or
+    /// coarser cells, or the distance fog alone. Low draws the distance fog.
+    public var fog: FogQuality = .high
+
+    /// How fog is drawn.
+    public enum FogQuality: String, CaseIterable, Sendable, Codable {
+        /// Distance fog alone: no shafts, no ground fog.
+        case low
+        /// Volumetric, a cell every 24 pixels, 48 deep.
+        case medium
+        /// Volumetric, a cell every 16 pixels, 64 deep.
+        case high
+    }
 
     /// How clouds are drawn.
     public enum CloudQuality: String, CaseIterable, Sendable, Codable {
@@ -142,6 +155,7 @@ public nonisolated struct GraphicsSettings: Equatable, Sendable, Codable {
         textureQuality = (try? c.decodeIfPresent(TextureQuality.self, forKey: .textureQuality)) ?? d.textureQuality
         snowDepth = (try? c.decodeIfPresent(Bool.self, forKey: .snowDepth)) ?? d.snowDepth
         clouds = (try? c.decodeIfPresent(CloudQuality.self, forKey: .clouds)) ?? d.clouds
+        fog = (try? c.decodeIfPresent(FogQuality.self, forKey: .fog)) ?? d.fog
     }
 
     /// **Clamped where it is used**, so a stale saved value cannot ask for something the screen never offers.
@@ -182,6 +196,7 @@ public nonisolated struct GraphicsSettings: Equatable, Sendable, Codable {
                 s.drawDistance = 0.8
                 s.plantDensity = 0.75
                 s.clouds = .medium
+                s.fog = .medium
             case .low:
                 s.antiAliasing = 1
                 s.shadows = .off
@@ -192,6 +207,7 @@ public nonisolated struct GraphicsSettings: Equatable, Sendable, Codable {
                 s.textureQuality = .half
                 s.snowDepth = false
                 s.clouds = .flat
+                s.fog = .low
             }
             return s
         }
@@ -213,7 +229,7 @@ public nonisolated struct GraphicsSettings: Equatable, Sendable, Codable {
         return "shadows \(shadows.rawValue), draw \(Int((drawDistance * 100).rounded()))%, "
             + "ground cover \(Int((plantDensity * 100).rounded()))%, scale \(scale), "
             + "\(antiAliasing)× anti-aliasing, reflections \(reflections ? "on" : "off"), "
-            + "textures \(textureQuality.rawValue), snow depth \(snowDepth ? "on" : "off"), clouds \(clouds.rawValue), "
+            + "textures \(textureQuality.rawValue), snow depth \(snowDepth ? "on" : "off"), clouds \(clouds.rawValue), fog \(fog.rawValue), "
             + "\(frameRate) fps"
     }
 

@@ -63,7 +63,7 @@ let package = Package(
             resources: [.copy("HUDShaders.metal"), .copy("ToneMapShaders.metal"), .copy("SkyShaders.metal"),
                         .copy("ParticleShaders.metal"), .copy("DecalShaders.metal"), .copy("SkinningShaders.metal"),
                         .copy("BoundaryShaders.metal"), .copy("WaymarkShaders.metal"),
-                        .copy("WeatherShaders.metal")],
+                        .copy("WeatherShaders.metal"), .copy("FogShaders.metal")],
             swiftSettings: [
                 // Matches the game targets: everything is main-actor by default unless it says
                 // otherwise. Engine types that must run off the main thread say `nonisolated`

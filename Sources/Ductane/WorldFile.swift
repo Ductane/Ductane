@@ -548,11 +548,15 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         /// **The world's clock** (2026-11-16): the day running, the season on its calendar, the sun by latitude — a game sets
         /// its sky from it each frame (``WorldClock/sky(_:at:)``). Nil is the hour as set on the engine's equinox day.
         public var clock: WorldClock?
-        public init(timeOfDay: Float = 15, fogDensity: Float = 0, sun: Sun? = nil, clock: WorldClock? = nil) {
+        /// **How much aurora the world has** (``DaySky/aurora``): nil as the latitude gives it.
+        public var aurora: Float?
+        public init(timeOfDay: Float = 15, fogDensity: Float = 0, sun: Sun? = nil, clock: WorldClock? = nil,
+                    aurora: Float? = nil) {
             self.timeOfDay = timeOfDay
             self.fogDensity = fogDensity
             self.sun = sun
             self.clock = clock
+            self.aurora = aurora
         }
 
         public struct Sun: Codable, Equatable, Sendable {
@@ -572,11 +576,13 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
 
         /// The sky as ``DaySky`` draws and lights it.
         public var daySky: DaySky {
-            DaySky(timeOfDay: timeOfDay, sun: sun.map {
+            var sky = DaySky(timeOfDay: timeOfDay, sun: sun.map {
                 DaySky.Sun(heading: $0.heading, height: $0.height,
                            colour: $0.colour.count == 3 ? SIMD3($0.colour[0], $0.colour[1], $0.colour[2]) : SIMD3(1, 1, 1),
                            brightness: $0.brightness)
             }, fogDensity: fogDensity)
+            sky.aurora = aurora ?? 1
+            return sky
         }
     }
 

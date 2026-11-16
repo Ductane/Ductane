@@ -113,7 +113,9 @@ struct WeatherTests {
         #expect(abs(Float(hour.count) - 360) < 60, "\(hour.count) in an hour at 6 a minute")
         for strike in hour {
             let d = simd_length(strike.position)
-            #expect(Weather.strikeDistances.contains(d) || abs(d - Weather.strikeDistances.upperBound) < 0.01)
+            // Far ones out at lightning's distances; a close one within the world (``Weather/closeDistances``).
+            let span = strike.isClose ? Weather.closeDistances : Weather.strikeDistances
+            #expect(span.contains(d) || abs(d - span.upperBound) < 0.01)
         }
         #expect(zip(hour, hour.dropFirst()).allSatisfy { $0.time < $1.time })
     }

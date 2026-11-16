@@ -24,7 +24,7 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
 
     /// What the sky is doing.
     public enum Kind: String, Sendable, Codable, CaseIterable {
-        case clear, overcast, rain, storm, snow, fog
+        case clear, overcast, rain, storm, snow, fog, dust
     }
 
     /// **The numbers everything is drawn and heard from.**
@@ -41,9 +41,13 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
         public var fogDensity: Float
         /// Lightning strikes a minute, on average.
         public var lightning: Float
+        /// **How much dust is in the air**, 0…1 (2026-11-16): streaking past on the wind, a haze of the world's
+        /// ``Weather/dustColour`` closing the view, the sun a dim disc through it, dust settling on what faces up.
+        public var dust: Float
 
         public init(cloudCover: Float = 0, precipitation: Float = 0, snow: Bool = false, windSpeed: Float = 0,
-                    fogDensity: Float = 0, lightning: Float = 0) {
+                    fogDensity: Float = 0, lightning: Float = 0, dust: Float = 0) {
+            self.dust = dust.isFinite ? min(max(dust, 0), 1) : 0
             self.cloudCover = min(max(cloudCover, 0), 1)
             self.precipitation = min(max(precipitation, 0), 1)
             self.snow = snow
@@ -60,7 +64,8 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
                       snow: (try? c.decodeIfPresent(Bool.self, forKey: .snow)) ?? false,
                       windSpeed: (try? c.decodeIfPresent(Float.self, forKey: .windSpeed)) ?? 0,
                       fogDensity: (try? c.decodeIfPresent(Float.self, forKey: .fogDensity)) ?? 0,
-                      lightning: (try? c.decodeIfPresent(Float.self, forKey: .lightning)) ?? 0)
+                      lightning: (try? c.decodeIfPresent(Float.self, forKey: .lightning)) ?? 0,
+                      dust: (try? c.decodeIfPresent(Float.self, forKey: .dust)) ?? 0)
         }
     }
 
@@ -98,10 +103,21 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
     /// **How much the world's foliage and cloth move in its wind**, 0 still … 2 twice the weather's — a sheltered valley
     /// calmer, an exposed coast livelier (``foliageWind(at:)``).
     public var sway: Float
+    /// **The colour of the world's dust**, linear: what a dust storm's haze, streaks and settled dust are — a desert's tan,
+    /// a red planet's rust, grey ash.
+    public var dustColour: SIMD3<Float>
+    /// A desert's tan.
+    public static let desertDust = SIMD3<Float>(0.62, 0.43, 0.25)
+    /// **The world's own ground fog** (``GroundFog``): how much, how high it lies, its colour — the weather and the hour
+    /// decide when it comes (``groundFogDensity(hour:)``).
+    public var groundFog: GroundFog
 
     public init(kind: Kind = .clear, severity: Float = 0.5, windHeading: Float = 60, byHand: Settings? = nil,
                 seed: UInt32 = 1, schedule: WeatherSchedule? = nil, lyingSnow: Float = 0, snowDepth: Bool = false,
-                wetness: Float = 0, puddles: Float? = nil, cloudShape: CloudShape = CloudShape(), sway: Float = 1) {
+                wetness: Float = 0, puddles: Float? = nil, cloudShape: CloudShape = CloudShape(), sway: Float = 1,
+                dustColour: SIMD3<Float> = Weather.desertDust, groundFog: GroundFog = GroundFog()) {
+        self.groundFog = groundFog
+        self.dustColour = all(dustColour .>= 0) && all(dustColour .<= 1) ? dustColour : Weather.desertDust
         self.cloudShape = cloudShape
         self.sway = sway.isFinite ? min(max(sway, 0), 2) : 1
         self.kind = kind
@@ -132,7 +148,9 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
                   wetness: (try? c.decodeIfPresent(Float.self, forKey: .wetness)) ?? 0,
                   puddles: try? c.decodeIfPresent(Float.self, forKey: .puddles),
                   cloudShape: (try? c.decodeIfPresent(CloudShape.self, forKey: .cloudShape)) ?? CloudShape(),
-                  sway: (try? c.decodeIfPresent(Float.self, forKey: .sway)) ?? 1)
+                  sway: (try? c.decodeIfPresent(Float.self, forKey: .sway)) ?? 1,
+                  dustColour: (try? c.decodeIfPresent(SIMD3<Float>.self, forKey: .dustColour)) ?? Weather.desertDust,
+                  groundFog: (try? c.decodeIfPresent(GroundFog.self, forKey: .groundFog)) ?? GroundFog())
     }
 
     /// A clear sky, no wind to speak of: what a world without weather has.
@@ -171,6 +189,8 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
                      fogDensity: mix(0.002, 0.008))
         case .fog:
             Settings(cloudCover: mix(0.4, 0.8), windSpeed: mix(0, 1.5), fogDensity: mix(0.006, 0.025))
+        case .dust:
+            Settings(cloudCover: mix(0.1, 0.35), windSpeed: mix(8, 22), fogDensity: mix(0.004, 0.024), dust: mix(0.3, 1))
         }
     }
 
@@ -192,7 +212,7 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
     public func lighting(_ base: DaySky.Lighting, flash: Float = 0) -> DaySky.Lighting {
         let s = settings
         let cover = s.cloudCover, wet = s.precipitation
-        guard cover > 0 || wet > 0 || flash > 0 else { return base }
+        guard cover > 0 || wet > 0 || flash > 0 || s.dust > 0 else { return base }
         var light = base
         let direct = 1 - 0.9 * pow(cover, 1.4)
         light.colour = base.colour * direct
@@ -211,6 +231,16 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
         light.skyLight = simd_mix(sky, grey(sky, lost * 0.03), SIMD3(repeating: cover)) * (1 - 0.3 * cover) * darker
         light.ground = base.ground * (1 - 0.5 * cover) * darker
         light.colour *= darker
+        // **Dust**: the sky and the distance the dust's colour, the sun dimmed and reddened through it.
+        if s.dust > 0 {
+            let d = s.dust
+            let haze = dustColour * Self.luminance(light.horizon) / max(Self.luminance(dustColour), 0.05)
+            light.horizon = simd_mix(light.horizon, haze * 1.1, SIMD3(repeating: d * 0.9))
+            light.zenith = simd_mix(light.zenith, haze * 0.8, SIMD3(repeating: d * 0.75))
+            light.colour *= simd_mix(SIMD3(repeating: 1), dustColour / max(simd_reduce_max(dustColour), 0.05),
+                                     SIMD3(repeating: d * 0.7)) * (1 - 0.55 * d)
+            light.skyLight = simd_mix(light.skyLight, haze * 0.6, SIMD3(repeating: d * 0.5))
+        }
         if flash > 0 {
             let burst = Self.flashColour * flash
             light.zenith += burst * 2
@@ -237,14 +267,25 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
 
     // MARK: Lightning
 
-    /// **A lightning strike**: when, in seconds on the clock the weather is drawn by, and where on the ground.
+    /// **A lightning strike**: when, in seconds on the clock the weather is drawn by, and where — on the ground, or for
+    /// one that stays in the clouds, under where it flashed. A **close** one lands within the world (``closeDistances``):
+    /// a renderer brings it down on the tallest thing near it, and a game told of it may scorch, burn or hurt as it likes.
     public struct Strike: Sendable, Equatable {
         public var time: Double
         public var position: SIMD2<Float>
+        /// Whether it stays in the clouds — a flash that lights them from within and reaches nothing.
+        public var inCloud: Bool
+        /// Whether it lands within the world rather than far off.
+        public var isClose: Bool
+        /// Its own number: what shapes its bolt (``LightningBolt``).
+        public var seed: UInt32
 
-        public init(time: Double, position: SIMD2<Float>) {
+        public init(time: Double, position: SIMD2<Float>, inCloud: Bool = false, isClose: Bool = false, seed: UInt32 = 0) {
             self.time = time
             self.position = position
+            self.inCloud = inCloud
+            self.isClose = isClose
+            self.seed = seed
         }
 
         /// How far it is from `listener`, metres.
@@ -282,6 +323,11 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
     static let flashLength: Double = 0.7
     /// How near and how far from the world's middle lightning strikes, metres: rarely overhead, never out of hearing.
     public static let strikeDistances: ClosedRange<Float> = 400...3000
+    /// **Where a close strike lands**, metres from the world's middle: within a world, about one strike in ten.
+    public static let closeDistances: ClosedRange<Float> = 15...220
+    /// The share of strikes that land close, and of the rest that stay in the clouds.
+    public static let closeShare = 0.1
+    public static let inCloudShare = 0.35
     /// Strikes come from one-second slots: at most one a second.
     static let slot: Double = 1
 
@@ -299,9 +345,12 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
                 let time = (Double(n) + Self.unit(seed, n, 1)) * Self.slot
                 if time >= start, time < end {
                     let angle = Float(Self.unit(seed, n, 2)) * 2 * .pi
-                    let span = Self.strikeDistances
+                    let close = Self.unit(seed, n, 4) < Self.closeShare
+                    let inCloud = !close && Self.unit(seed, n, 5) < Self.inCloudShare
+                    let span = close ? Self.closeDistances : Self.strikeDistances
                     let distance = span.lowerBound + Float(Self.unit(seed, n, 3)) * (span.upperBound - span.lowerBound)
-                    strikes.append(Strike(time: time, position: SIMD2(cos(angle), sin(angle)) * distance))
+                    strikes.append(Strike(time: time, position: SIMD2(cos(angle), sin(angle)) * distance, inCloud: inCloud,
+                                          isClose: close, seed: UInt32(truncatingIfNeeded: Int(Self.unit(seed, n, 6) * 4e9))))
                 }
             }
             n += 1
@@ -333,6 +382,9 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
         let s = settings
         return s.snow ? 0 : pow(s.precipitation, 0.7)
     }
+
+    /// How loud a dust storm's hiss is, 0…1.
+    public var dustVolume: Float { pow(settings.dust, 0.8) }
 
     /// How loud the wind is, 0…1: nothing under a breeze, full in a gale.
     public var windVolume: Float {

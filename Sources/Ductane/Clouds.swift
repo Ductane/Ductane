@@ -220,4 +220,25 @@ public nonisolated struct NightSky: Sendable, Equatable {
     public var sun: SIMD3<Float>
     /// How much of the moon's face is lit, 0 new … 1 full.
     public var illumination: Float
+    /// **Tonight's aurora**, 0…1, already dimmed by the dawn (``DaySky/auroraStrength``).
+    public var aurora: Float = 0
+    /// Toward the pole the aurora hangs over, level: north in the northern hemisphere, south in the southern.
+    public var pole: SIMD3<Float> = SIMD3(0, 0, -1)
+}
+
+public nonisolated extension Weather {
+    /// **How strong a rainbow is**, 0…1, with the sun `sunElevation` radians high: where physics puts one — rain falling
+    /// with the sun out through broken cloud, and the sun up but under 42°, the bow being 42° from the point opposite it.
+    /// A clearing shower on a schedule makes one as its rain thins and its cloud breaks.
+    func rainbow(sunElevation: Float) -> Float {
+        let s = settings
+        guard !s.snow, kind != .dust else { return 0 }
+        let degrees = sunElevation * 180 / .pi
+        func smooth(_ a: Float, _ b: Float, _ x: Float) -> Float {
+            let t = min(max((x - a) / (b - a), 0), 1)
+            return t * t * (3 - 2 * t)
+        }
+        return smooth(0.02, 0.3, s.precipitation) * (1 - smooth(0.7, 0.98, s.cloudCover)) * smooth(0, 4, degrees)
+            * (1 - smooth(36, 42, degrees))
+    }
 }

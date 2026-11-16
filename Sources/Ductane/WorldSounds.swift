@@ -206,37 +206,41 @@ extension WorldFile {
             /// Indices into ``Sounds/files``.
             public var rain: Int?
             public var wind: Int?
+            /// A dust storm's hiss of sand on the wind, as loud as ``Weather/dustVolume``.
+            public var dust: Int?
             /// The takes thunder picks from.
             public var thunder: [Int]
             /// 0…1: how loud all of it is at its heaviest.
             public var volume: Float
 
-            public init(rain: Int? = nil, wind: Int? = nil, thunder: [Int] = [], volume: Float = 0.8) {
+            public init(rain: Int? = nil, wind: Int? = nil, dust: Int? = nil, thunder: [Int] = [], volume: Float = 0.8) {
                 self.rain = rain
                 self.wind = wind
+                self.dust = dust
                 self.thunder = thunder
                 self.volume = min(max(volume, 0), 1)
             }
 
-            public var isEmpty: Bool { rain == nil && wind == nil && thunder.isEmpty }
+            public var isEmpty: Bool { rain == nil && wind == nil && dust == nil && thunder.isEmpty }
 
             /// What a file leaves out is none.
             public init(from decoder: Decoder) throws {
                 let c = try decoder.container(keyedBy: CodingKeys.self)
                 self.init(rain: try c.decodeIfPresent(Int.self, forKey: .rain),
                           wind: try c.decodeIfPresent(Int.self, forKey: .wind),
+                          dust: try c.decodeIfPresent(Int.self, forKey: .dust),
                           thunder: try c.decodeIfPresent([Int].self, forKey: .thunder) ?? [],
                           volume: try c.decodeIfPresent(Float.self, forKey: .volume) ?? 0.8)
             }
 
-            private enum CodingKeys: String, CodingKey { case rain, wind, thunder, volume }
+            private enum CodingKeys: String, CodingKey { case rain, wind, dust, thunder, volume }
         }
 
         /// Every index into ``files`` the sounds name — what reading checks.
         var named: [Int] {
             points.map(\.sound) + ambiences.map(\.sound) + ambiences.compactMap(\.night) + scattered.flatMap(\.sounds)
                 + (music?.tracks ?? [])
-                + [weather?.rain, weather?.wind].compactMap { $0 } + (weather?.thunder ?? [])
+                + [weather?.rain, weather?.wind, weather?.dust].compactMap { $0 } + (weather?.thunder ?? [])
         }
 
         /// What a file leaves out is empty.

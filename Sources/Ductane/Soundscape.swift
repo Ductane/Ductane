@@ -48,6 +48,7 @@ public final class Soundscape {
     /// The rain and wind beds playing, with the file each plays.
     private var rainBed: (loop: AudioEngine.Loop, file: String)?
     private var windBed: (loop: AudioEngine.Loop, file: String)?
+    private var dustBed: (loop: AudioEngine.Loop, file: String)?
     /// Strikes up to this time have had their thunder sent on its way.
     private var heardUntil: Double?
     /// Thunder on its way: when it arrives, which file, how loud, and from which way.
@@ -181,6 +182,7 @@ public final class Soundscape {
         }
         bed(&rainBed, file: sounds?.rain, level: (weather?.rainVolume ?? 0) * volume)
         bed(&windBed, file: sounds?.wind, level: (weather?.windVolume ?? 0) * volume)
+        bed(&dustBed, file: sounds?.dust, level: (weather?.dustVolume ?? 0) * volume)
     }
 
     /// **Sends each new strike's thunder on its way**, and plays what has arrived: from the strike's direction, as loud
@@ -312,7 +314,8 @@ public final class Soundscape {
     }
 
     /// Loops and beds playing — for a test, or a game's statistics.
-    public var playingCount: Int { points.count + beds.count + nightBeds.count + (rainBed == nil ? 0 : 1) + (windBed == nil ? 0 : 1) }
+    public var playingCount: Int { points.count + beds.count + nightBeds.count + (rainBed == nil ? 0 : 1) + (windBed == nil ? 0 : 1)
+        + (dustBed == nil ? 0 : 1) }
 
     /// **Holds the world's sound** — under a menu, in a paused editor — stopping every loop and bed; ``resume()`` starts
     /// what is in reach again. The music is held too, when it is the world's.
@@ -343,12 +346,13 @@ public final class Soundscape {
         for playing in points.values { audio.stopLoop(playing.loop) }
         for playing in beds.values { audio.stopLoop(playing.loop) }
         for playing in nightBeds.values { audio.stopLoop(playing.loop) }
-        for playing in [rainBed, windBed].compactMap({ $0 }) { audio.stopLoop(playing.loop) }
+        for playing in [rainBed, windBed, dustBed].compactMap({ $0 }) { audio.stopLoop(playing.loop) }
         points = [:]
         beds = [:]
         nightBeds = [:]
         rainBed = nil
         windBed = nil
+        dustBed = nil
         thunders = []
     }
 }

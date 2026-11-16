@@ -40,6 +40,11 @@ public nonisolated struct DaySky: Sendable, Equatable {
     /// **How far through its month the moon is** (2026-11-16), 0…1: 0 new, 0.5 full. Nil is a full moon, opposite the sun —
     /// the engine's night before there was a moon of its own. ``WorldClock`` sets it from its calendar.
     public var moonAge: Double?
+    /// **How much aurora this world has** (2026-11-16), 0 none … 1 as the latitude gives it … 2 every clear night, strong.
+    public var aurora: Float = 1
+    /// **Which night it is**, a number the clock counts: what the aurora varies by, the same for every player that night.
+    /// Nil without a clock, when there is no natural aurora (``auroraStrength``).
+    public var nightNumber: Int? = nil
 
     public init(timeOfDay: Float = 15, sun: Sun? = nil, fogDensity: Float = 0,
                 saturation: Float = 1, zenithBrightness: Float = 1, latitude: Float? = nil, yearPosition: Double = 1,
@@ -231,7 +236,28 @@ public nonisolated struct DaySky: Sendable, Equatable {
         let rotation = simd_float3x3(simd_quatf(angle: -angle, axis: pole))
         let degrees = sun.elevation * 180 / .pi
         return NightSky(starRotation: rotation, stars: Self.smoothstep(-2, -14, degrees), moon: moon.direction,
-                        sun: sun.direction, illumination: moon.illumination)
+                        sun: sun.direction, illumination: moon.illumination,
+                        aurora: auroraStrength * Self.smoothstep(-10, -16, degrees),
+                        pole: (latitude ?? 45) < 0 ? SIMD3(0, 0, 1) : SIMD3(0, 0, -1))
+    }
+
+    /// **How strong tonight's aurora is**, 0…1: like the real one, often near the poles, now and then at mid-latitudes,
+    /// never near the equator, varying night to night by ``nightNumber``; then the world's ``aurora`` — less, none, or up
+    /// to every night.
+    public var auroraStrength: Float {
+        let lat = abs(latitude ?? 45)
+        // The chance of a showing on a night: about 4 in 5 by the auroral zone, 1 in 12 at 45°, none below 35°.
+        let chance = Self.smoothstep(35, 50, lat) * 0.15 + Self.smoothstep(50, 65, lat) * 0.65
+        // **Without a clock there is no run of nights**, so no natural showing: the same night every night would be an aurora
+        // in every scene or none. The world's own amount above 1 still brings one.
+        var h = UInt64(bitPattern: Int64(nightNumber ?? 0)) &* 0x9E37_79B9_7F4A_7C15
+        h = (h ^ (h >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        h = (h ^ (h >> 27)) &* 0x94D0_49BB_1331_11EB
+        h ^= h >> 31
+        let roll = Float(h >> 40) / Float(1 << 24), size = Float((h >> 8) & 0xFFFF) / 65_535
+        let natural: Float = nightNumber != nil && roll < chance ? 0.35 + 0.65 * size : 0
+        let amount = min(max(aurora.isFinite ? aurora : 1, 0), 2)
+        return amount <= 1 ? natural * amount : natural + (1 - natural) * (amount - 1) * (0.6 + 0.4 * size)
     }
 
     // MARK: Keyframes

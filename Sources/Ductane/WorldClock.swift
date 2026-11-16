@@ -120,6 +120,7 @@ public nonisolated struct WorldClock: Sendable, Equatable, Codable {
         sky.latitude = latitude
         sky.yearPosition = yearPosition(at: time)
         sky.moonAge = moonAge(at: time)
+        sky.nightNumber = nightNumber(at: time)
         return sky
     }
 
@@ -140,6 +141,13 @@ public nonisolated struct WorldClock: Sendable, Equatable, Codable {
     }
 
     static func wrapped(_ x: Double) -> Double { x - x.rounded(.down) }
+
+    /// **Which night `time` falls in**: a count that steps up each game noon, so a night keeps its number past midnight.
+    public func nightNumber(at time: Double) -> Int {
+        let days = gameDays(at: time)
+        guard days.isFinite else { return 0 }
+        return Int(max(min((days + 0.5).rounded(.down), 1e15), -1e15))
+    }
 
     /// The moon's months in a real year.
     public static let monthsAYear = 12.368
