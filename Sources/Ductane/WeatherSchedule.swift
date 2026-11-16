@@ -156,25 +156,36 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
     /// **How much snow the schedule has laid by `time`**, 0…1: built in snow spells as hard as they fall, melted after,
     /// faster in rain — counted spell by spell over the last ``snowMemory`` from none, so everyone with the clock has the
     /// same amount. The changes between spells are not counted: a few minutes either way.
+    ///
+    /// **Cheap to ask every frame**: a schedule with no chance of snow lays none and counts nothing, and the snow laid by the
+    /// start of the spell under way is worked out once and remembered (``SnowLaid``) — counting back two days of spells on
+    /// every call, ten calls a frame, took an editor showing a scheduled world from 60 frames a second to 2.
     public func builtSnow(at time: Double) -> Float {
-        guard time.isFinite else { return 0 }
-        var t = time - Self.snowMemory
-        var spell = spell(at: t)
+        guard time.isFinite, (chances[.snow] ?? 0) > 0 else { return 0 }
+        let now = spell(at: time)
+        let start = SnowLaid.shared.snow(of: self, atStartOf: now.index) { snowLaid(before: now) }
+        return Float(Self.laid(start, in: now, for: max(time - now.start, 0)))
+    }
+
+    /// The snow laid by the start of `spell`, counted over the ``snowMemory`` before it.
+    func snowLaid(before spell: Spell) -> Double {
+        var t = spell.start - Self.snowMemory
+        var each = self.spell(at: t)
         var snow = 0.0
-        for _ in 0..<100_000 {
-            let end = min(spell.end, time), span = max(end - t, 0)
-            let falling = Weather.preset(spell.kind, severity: spell.severity)
-            let p = Double(falling.precipitation)
-            if p > 0, falling.snow {
-                snow = min(1, snow + p * Self.snowBuilds * span)
-            } else {
-                snow = max(0, snow - (Self.snowMelts + p * Self.rainMelts) * span)
-            }
-            if spell.end >= time { break }
-            t = spell.end
-            spell = self.spell(spell.index + 1)
+        for _ in 0..<100_000 where each.index < spell.index {
+            snow = Self.laid(snow, in: each, for: max(min(each.end, spell.start) - t, 0))
+            t = each.end
+            each = self.spell(each.index + 1)
         }
-        return Float(snow)
+        return snow
+    }
+
+    /// `snow` after `seconds` of `spell`: built as hard as it snows, else melted, faster in rain.
+    static func laid(_ snow: Double, in spell: Spell, for seconds: Double) -> Double {
+        let falling = Weather.preset(spell.kind, severity: spell.severity)
+        let p = Double(falling.precipitation)
+        if p > 0, falling.snow { return min(1, snow + p * snowBuilds * seconds) }
+        return max(0, snow - (snowMelts + p * rainMelts) * seconds)
     }
 
     /// **Settings part way from one to another.** Rain turning to snow, or back, eases off before the other begins, so
@@ -245,4 +256,24 @@ public nonisolated extension Weather {
     /// **The real-world time**, seconds since 1970 (UTC): the clock a schedule runs by when a game gives none, so everyone
     /// sees one sky without a server.
     static func realTime() -> Double { Date().timeIntervalSince1970 }
+}
+
+
+/// **The snow laid by the start of a spell, remembered** — ``WeatherSchedule/builtSnow(at:)`` asks every frame, and the
+/// count behind it covers two days of spells. A few schedules' last answers, shared by every caller; the same schedule
+/// and spell always give the same snow, so a remembered one is never wrong.
+nonisolated final class SnowLaid: @unchecked Sendable {
+    static let shared = SnowLaid()
+    private let lock = NSLock()
+    private var entries: [(schedule: WeatherSchedule, index: Int64, snow: Double)] = []
+
+    func snow(of schedule: WeatherSchedule, atStartOf index: Int64, counting: () -> Double) -> Double {
+        if let known = lock.withLock({ entries.first { $0.index == index && $0.schedule == schedule }?.snow }) { return known }
+        let snow = counting()
+        lock.withLock {
+            entries.insert((schedule, index, snow), at: 0)
+            if entries.count > 8 { entries.removeLast() }
+        }
+        return snow
+    }
 }

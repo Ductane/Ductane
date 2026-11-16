@@ -162,8 +162,15 @@ struct WeatherScheduleTests {
         // Without a schedule, the snow as set.
         #expect(Weather(lyingSnow: 0.7).current(at: Self.now).lyingSnow == 0.7)
         #expect(Weather(lyingSnow: 3).lyingSnow == 1 && Weather(lyingSnow: .nan).lyingSnow == 0)
-        // The same for everyone.
+        // The same for everyone — and the same remembered as counted afresh.
         #expect(mixed.builtSnow(at: Self.now + 77) == mixed.builtSnow(at: Self.now + 77))
+        let here = mixed.spell(at: Self.now + 77)
+        #expect(mixed.builtSnow(at: Self.now + 77)
+                == Float(WeatherSchedule.laid(mixed.snowLaid(before: here), in: here, for: Self.now + 77 - here.start)))
+        // **Cheap every frame** (2026-11-15): a thousand asks within a spell take well under a frame.
+        let clock = ContinuousClock.now
+        for i in 0..<1000 { _ = mixed.builtSnow(at: Self.now + Double(i) * 0.016) }
+        #expect(ContinuousClock.now - clock < .milliseconds(50))
         // Written and read back; a weather from before snow has none.
         let read = try JSONDecoder().decode(Weather.self, from: JSONEncoder().encode(Weather(lyingSnow: 0.6, snowDepth: true)))
         #expect(read.lyingSnow == 0.6 && read.snowDepth)
