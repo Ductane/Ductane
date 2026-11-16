@@ -147,7 +147,7 @@ public final class VolumetricFog {
     /// The thin haze the lights glow in even in clear air, per metre.
     public nonisolated static let haze: Float = 0.004
     /// **The wisps' pattern repeats every this many metres** — 256 of their 18 m cells — so how far the wind has carried
-    /// them wraps there with no seam (``Weather/wispDrift(at:)``).
+    /// them wraps there with no seam (``Weather/wisps(at:)``).
     public nonisolated static let wispPeriod: Float = 18 * 256
 
     private let device: MTLDevice

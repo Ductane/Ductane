@@ -406,6 +406,11 @@ static inline float3 duSwayed(float3 world, float3 root, float scale, float4 swa
 
 /// **A tree's numbers through the year, once a copy** (vertex stage): the colour its leaves turn to and how far — straw
 /// and how far for grass — and how much of its leaves it has. Nothing for a prop the season leaves alone.
+///
+/// **`foliage` is the prop's** (the same vector `duLeavesLeft` takes): x what the season does to it (`Foliage`: 1 a tree
+/// that turns, 2 grass, 0 neither); y where foliage is in its year (`FallColors.phase(yearPosition:southern:)`, 0
+/// midsummer … 2 midwinter … 4); z 1 when trees stand bare in winter (`FallColors.bareInWinter`); w how far leaves turn
+/// (`FallColors.extent`). All zero through high summer (`FallColors.changesAnything`), when nothing changes.
 static inline void duSeasonOf(float2 root, float4 foliage, constant DUWeatherSurface &weather,
                      thread float4 &colour, thread float &leaves) {
     colour = float4(0);
