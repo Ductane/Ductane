@@ -27,7 +27,7 @@ struct GraphicsSettingsTests {
         #expect(GraphicsSettings().summary == "High, 60 fps")
         var own = GraphicsSettings.Preset.medium.settings
         own.renderScale = .threeQuarters
-        #expect(own.summary == "shadows low, draw 80%, ground cover 75%, scale ¾, 2× anti-aliasing, reflections on, textures full, 60 fps")
+        #expect(own.summary == "shadows low, draw 80%, ground cover 75%, scale ¾, 2× anti-aliasing, reflections on, textures full, snow depth on, 60 fps")
     }
 
     @Test("Saved settings that ask for more or less than the screen offers are brought back in range")

@@ -127,4 +127,49 @@ struct WeatherScheduleTests {
         let old = try JSONDecoder().decode(Weather.self, from: Data(#"{"kind":"rain","severity":0.4}"#.utf8))
         #expect(old.schedule == nil && old.kind == .rain)
     }
+
+    @Test("Snow builds in snow spells and melts after, faster in rain; never less than the snow set lying")
+    func lyingSnow() throws {
+        // Snow only: it builds to full and stays.
+        let snowy = WeatherSchedule(chances: [.snow: 1], seed: 4)
+        #expect(snowy.builtSnow(at: Self.now) == 1)
+        // Clear only: none lies.
+        #expect(WeatherSchedule(chances: [.clear: 1]).builtSnow(at: Self.now) == 0)
+        // Snow then clear: find a snow spell followed by a clear one, and watch it build and melt.
+        let mixed = WeatherSchedule(chances: [.snow: 1, .clear: 1, .rain: 1], shortest: 1800, longest: 3600, seed: 21)
+        var found = false
+        for i in Int64(400_000)..<400_400 {
+            let a = mixed.spell(i), b = mixed.spell(i + 1)
+            guard a.kind == .snow, b.kind != .snow else { continue }
+            let start = mixed.builtSnow(at: a.start), peak = mixed.builtSnow(at: a.end)
+            #expect(peak > start, "builds while it snows")
+            let later = mixed.builtSnow(at: min(b.end, a.end + 1200))
+            #expect(later < peak, "melts after")
+            if b.kind == .rain {
+                let melt = Double(peak - later) / min(b.end - a.end, 1200)
+                #expect(melt > WeatherSchedule.snowMelts * 0.99, "rain melts faster")
+            }
+            found = true
+            break
+        }
+        #expect(found)
+        // The weather at a moment carries the amount; the snow set lying is the least it shows.
+        var weather = Weather(lyingSnow: 0.4, snowDepth: true)
+        weather.schedule = WeatherSchedule(chances: [.clear: 1])
+        #expect(weather.current(at: Self.now).lyingSnow == 0.4 && weather.current(at: Self.now).snowDepth)
+        weather.schedule = snowy
+        #expect(weather.current(at: Self.now).lyingSnow == 1)
+        // Without a schedule, the snow as set.
+        #expect(Weather(lyingSnow: 0.7).current(at: Self.now).lyingSnow == 0.7)
+        #expect(Weather(lyingSnow: 3).lyingSnow == 1 && Weather(lyingSnow: .nan).lyingSnow == 0)
+        // The same for everyone.
+        #expect(mixed.builtSnow(at: Self.now + 77) == mixed.builtSnow(at: Self.now + 77))
+        // Written and read back; a weather from before snow has none.
+        let read = try JSONDecoder().decode(Weather.self, from: JSONEncoder().encode(Weather(lyingSnow: 0.6, snowDepth: true)))
+        #expect(read.lyingSnow == 0.6 && read.snowDepth)
+        let old = try JSONDecoder().decode(Weather.self, from: Data(#"{"kind":"snow"}"#.utf8))
+        #expect(old.lyingSnow == 0 && !old.snowDepth)
+        // Low graphics turn the depth off.
+        #expect(GraphicsSettings().snowDepth && !GraphicsSettings.Preset.low.settings.snowDepth)
+    }
 }

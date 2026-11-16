@@ -75,15 +75,24 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
     public var seed: UInt32
     /// **Weather that changes by itself**, when on: ``current(at:)`` follows it. Nil is weather as set.
     public var schedule: WeatherSchedule?
+    /// **How much snow lies**, 0 none…1 every face that looks at the sky white: what a world shows whatever falls, so a
+    /// winter map stays white under a clear sky. On a schedule, snow also builds while it snows and melts after —
+    /// ``current(at:)`` gives the amount at a moment, never less than this.
+    public var lyingSnow: Float
+    /// **Whether lying snow has depth on the ground** — the ground raised by up to ``deepestSnow`` where it lies — rather
+    /// than only whitening it. A game's graphics settings may turn it down (``GraphicsSettings/snowDepth``).
+    public var snowDepth: Bool
 
     public init(kind: Kind = .clear, severity: Float = 0.5, windHeading: Float = 60, byHand: Settings? = nil,
-                seed: UInt32 = 1, schedule: WeatherSchedule? = nil) {
+                seed: UInt32 = 1, schedule: WeatherSchedule? = nil, lyingSnow: Float = 0, snowDepth: Bool = false) {
         self.kind = kind
         self.severity = min(max(severity.isFinite ? severity : 0.5, 0), 1)
         self.windHeading = windHeading.isFinite ? windHeading : 60
         self.byHand = byHand
         self.seed = seed
         self.schedule = schedule
+        self.lyingSnow = min(max(lyingSnow.isFinite ? lyingSnow : 0, 0), 1)
+        self.snowDepth = snowDepth
     }
 
     /// What a file leaves out is the default, and a kind this engine does not know is clear.
@@ -95,7 +104,9 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
                   windHeading: (try? c.decodeIfPresent(Float.self, forKey: .windHeading)) ?? d.windHeading,
                   byHand: try? c.decodeIfPresent(Settings.self, forKey: .byHand),
                   seed: (try? c.decodeIfPresent(UInt32.self, forKey: .seed)) ?? d.seed,
-                  schedule: try? c.decodeIfPresent(WeatherSchedule.self, forKey: .schedule))
+                  schedule: try? c.decodeIfPresent(WeatherSchedule.self, forKey: .schedule),
+                  lyingSnow: (try? c.decodeIfPresent(Float.self, forKey: .lyingSnow)) ?? 0,
+                  snowDepth: (try? c.decodeIfPresent(Bool.self, forKey: .snowDepth)) ?? false)
     }
 
     /// A clear sky, no wind to speak of: what a world without weather has.
@@ -107,6 +118,8 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
     public static let fogDensities: ClosedRange<Float> = 0...0.03
     /// Strikes a minute: none to a storm overhead.
     public static let lightningRates: ClosedRange<Float> = 0...12
+    /// How deep lying snow is at its deepest, metres, when it has depth.
+    public static let deepestSnow: Float = 0.25
 
     /// The settings this weather is drawn from: by hand when set, else its kind at its severity.
     public var settings: Settings { byHand ?? Self.preset(kind, severity: severity) }

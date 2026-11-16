@@ -129,7 +129,8 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
     public func weather(at time: Double, under base: Weather) -> Weather {
         let now = spell(at: time)
         var weather = Weather(kind: now.kind, severity: now.severity, windHeading: base.windHeading + now.windTurn,
-                              seed: base.seed)
+                              seed: base.seed, lyingSnow: max(base.lyingSnow, builtSnow(at: time)),
+                              snowDepth: base.snowDepth)
         guard change > 0, time - now.start < change else { return weather }
         let before = spell(now.index - 1)
         let x = Float(min(max((time - now.start) / change, 0), 1))
@@ -139,6 +140,41 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
         weather.byHand = Self.blend(from, to, t)
         weather.windHeading = base.windHeading + before.windTurn + (now.windTurn - before.windTurn) * t
         return weather
+    }
+
+    // MARK: Lying snow
+
+    /// A share of full cover gained a second in the heaviest snow: white in twenty minutes.
+    public static let snowBuilds: Double = 1.0 / 1200
+    /// Lost a second with nothing falling: gone in two hours.
+    public static let snowMelts: Double = 1.0 / 7200
+    /// Lost a second more in the heaviest rain: rain takes it in about twenty-five minutes.
+    public static let rainMelts: Double = 1.0 / 1800
+    /// How far back the build-up is counted: snow older than this has long since lain or melted.
+    public static let snowMemory: Double = 48 * 3600
+
+    /// **How much snow the schedule has laid by `time`**, 0…1: built in snow spells as hard as they fall, melted after,
+    /// faster in rain — counted spell by spell over the last ``snowMemory`` from none, so everyone with the clock has the
+    /// same amount. The changes between spells are not counted: a few minutes either way.
+    public func builtSnow(at time: Double) -> Float {
+        guard time.isFinite else { return 0 }
+        var t = time - Self.snowMemory
+        var spell = spell(at: t)
+        var snow = 0.0
+        for _ in 0..<100_000 {
+            let end = min(spell.end, time), span = max(end - t, 0)
+            let falling = Weather.preset(spell.kind, severity: spell.severity)
+            let p = Double(falling.precipitation)
+            if p > 0, falling.snow {
+                snow = min(1, snow + p * Self.snowBuilds * span)
+            } else {
+                snow = max(0, snow - (Self.snowMelts + p * Self.rainMelts) * span)
+            }
+            if spell.end >= time { break }
+            t = spell.end
+            spell = self.spell(spell.index + 1)
+        }
+        return Float(snow)
     }
 
     /// **Settings part way from one to another.** Rain turning to snow, or back, eases off before the other begins, so
