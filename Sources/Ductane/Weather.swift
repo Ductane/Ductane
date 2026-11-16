@@ -92,10 +92,18 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
     /// **How full the puddles are**, 0…1 — slower than ``wetness`` both ways: they fill through a downpour and linger
     /// after. What ``current(at:)`` gives; as set, the same as ``wetness``, which sets it.
     public var puddles: Float
+    /// **The world's own clouds** (``CloudShape``): how high, how thick, how fast — the weather sets how much of the sky
+    /// they cover and how dark they are (``clouds(at:)``).
+    public var cloudShape: CloudShape
+    /// **How much the world's foliage and cloth move in its wind**, 0 still … 2 twice the weather's — a sheltered valley
+    /// calmer, an exposed coast livelier (``foliageWind(at:)``).
+    public var sway: Float
 
     public init(kind: Kind = .clear, severity: Float = 0.5, windHeading: Float = 60, byHand: Settings? = nil,
                 seed: UInt32 = 1, schedule: WeatherSchedule? = nil, lyingSnow: Float = 0, snowDepth: Bool = false,
-                wetness: Float = 0, puddles: Float? = nil) {
+                wetness: Float = 0, puddles: Float? = nil, cloudShape: CloudShape = CloudShape(), sway: Float = 1) {
+        self.cloudShape = cloudShape
+        self.sway = sway.isFinite ? min(max(sway, 0), 2) : 1
         self.kind = kind
         self.severity = min(max(severity.isFinite ? severity : 0.5, 0), 1)
         self.windHeading = windHeading.isFinite ? windHeading : 60
@@ -122,7 +130,9 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
                   lyingSnow: (try? c.decodeIfPresent(Float.self, forKey: .lyingSnow)) ?? 0,
                   snowDepth: (try? c.decodeIfPresent(Bool.self, forKey: .snowDepth)) ?? false,
                   wetness: (try? c.decodeIfPresent(Float.self, forKey: .wetness)) ?? 0,
-                  puddles: try? c.decodeIfPresent(Float.self, forKey: .puddles))
+                  puddles: try? c.decodeIfPresent(Float.self, forKey: .puddles),
+                  cloudShape: (try? c.decodeIfPresent(CloudShape.self, forKey: .cloudShape)) ?? CloudShape(),
+                  sway: (try? c.decodeIfPresent(Float.self, forKey: .sway)) ?? 1)
     }
 
     /// A clear sky, no wind to speak of: what a world without weather has.

@@ -36,10 +36,15 @@ public nonisolated struct WorldClock: Sendable, Equatable, Codable {
     public var latitude: Float
     /// **Foliage through the year** on this calendar (``FallColors``): trees turning, bare in winter, grass gone straw.
     public var foliage: FallColors
+    /// **How many game days the moon takes from new to new** on a game calendar. Nil keeps it in step with the year — about
+    /// 12 cycles a year, as the real one has (``moonAge(at:)``). The real-date calendar always has the real moon.
+    public var moonCycle: Double?
 
     public init(runsDay: Bool = true, dayLength: Double = 3600, nightSpeed: Double = 2,
-                calendar: Calendar = .days(perSeason: 7), latitude: Float = 45, foliage: FallColors = FallColors()) {
+                calendar: Calendar = .days(perSeason: 7), latitude: Float = 45, foliage: FallColors = FallColors(),
+                moonCycle: Double? = nil) {
         self.foliage = foliage
+        self.moonCycle = moonCycle.flatMap { $0.isFinite ? min(max($0, 0.5), 400) : nil }
         self.runsDay = runsDay
         self.dayLength = dayLength.isFinite ? min(max(dayLength, Self.dayLengths.lowerBound), Self.dayLengths.upperBound) : 3600
         self.nightSpeed = nightSpeed.isFinite ? min(max(nightSpeed, 1), 8) : 2
@@ -114,10 +119,30 @@ public nonisolated struct WorldClock: Sendable, Equatable, Codable {
         sky.timeOfDay = timeOfDay(at: time, held: base.timeOfDay)
         sky.latitude = latitude
         sky.yearPosition = yearPosition(at: time)
+        sky.moonAge = moonAge(at: time)
         return sky
     }
 
+    /// **The moon's age at `time`**, 0 new … 0.5 full … 1 (``DaySky/moonAge``): the real moon on the real date; on a game
+    /// calendar ``moonCycle`` game days a month, or in step with its year — 12.37 months a year, as the real one has — so
+    /// the moon changes from night to night as the seasons run by fast; held in a season, a real month of game days.
+    public func moonAge(at time: Double) -> Double {
+        let month: Double
+        switch calendar {
+        case .realDate:
+            // Days since a known new moon, 6 January 2000 18:14 UTC, over the synodic month.
+            let days = (time - 947_182_440) / 86_400
+            return Self.wrapped(days / 29.530_588)
+        case .days(let perSeason): month = moonCycle ?? 4 * perSeason / Self.monthsAYear
+        case .held: month = moonCycle ?? 29.530_588
+        }
+        return Self.wrapped(gameDays(at: time) / month)
+    }
+
     static func wrapped(_ x: Double) -> Double { x - x.rounded(.down) }
+
+    /// The moon's months in a real year.
+    public static let monthsAYear = 12.368
 
     /// **Where foliage is in its year at `time`** (``FallColors/phase(yearPosition:southern:)``): 0 midsummer, 1 the
     /// middle of autumn, 2 of winter, 3 of spring, where the world is.
@@ -127,7 +152,7 @@ public nonisolated struct WorldClock: Sendable, Equatable, Codable {
 
     // MARK: Coding
 
-    private enum CodingKeys: String, CodingKey { case runsDay, dayLength, nightSpeed, calendar, daysPerSeason, latitude, foliage }
+    private enum CodingKeys: String, CodingKey { case runsDay, dayLength, nightSpeed, calendar, daysPerSeason, latitude, foliage, moonCycle }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -142,7 +167,8 @@ public nonisolated struct WorldClock: Sendable, Equatable, Codable {
                   dayLength: (try? c.decodeIfPresent(Double.self, forKey: .dayLength)) ?? d.dayLength,
                   nightSpeed: (try? c.decodeIfPresent(Double.self, forKey: .nightSpeed)) ?? d.nightSpeed,
                   calendar: calendar, latitude: (try? c.decodeIfPresent(Float.self, forKey: .latitude)) ?? d.latitude,
-                  foliage: (try? c.decodeIfPresent(FallColors.self, forKey: .foliage)) ?? d.foliage)
+                  foliage: (try? c.decodeIfPresent(FallColors.self, forKey: .foliage)) ?? d.foliage,
+                  moonCycle: (try? c.decodeIfPresent(Double.self, forKey: .moonCycle)) ?? nil)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -159,5 +185,6 @@ public nonisolated struct WorldClock: Sendable, Equatable, Codable {
         }
         try c.encode(latitude, forKey: .latitude)
         try c.encode(foliage, forKey: .foliage)
+        try c.encodeIfPresent(moonCycle, forKey: .moonCycle)
     }
 }

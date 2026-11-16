@@ -37,9 +37,14 @@ public nonisolated struct DaySky: Sendable, Equatable {
     /// **Where in the year it is**, 0…4 on the northern calendar: 0 the middle of the northern winter, 1 of spring, 2 of
     /// summer, 3 of autumn. Only read with a ``latitude``; ``WorldClock`` sets it.
     public var yearPosition: Double = 1
+    /// **How far through its month the moon is** (2026-11-16), 0…1: 0 new, 0.5 full. Nil is a full moon, opposite the sun —
+    /// the engine's night before there was a moon of its own. ``WorldClock`` sets it from its calendar.
+    public var moonAge: Double?
 
     public init(timeOfDay: Float = 15, sun: Sun? = nil, fogDensity: Float = 0,
-                saturation: Float = 1, zenithBrightness: Float = 1, latitude: Float? = nil, yearPosition: Double = 1) {
+                saturation: Float = 1, zenithBrightness: Float = 1, latitude: Float? = nil, yearPosition: Double = 1,
+                moonAge: Double? = nil) {
+        self.moonAge = moonAge.map { $0.isFinite ? $0 - $0.rounded(.down) : 0.5 }
         self.timeOfDay = timeOfDay
         self.sun = sun
         self.fogDensity = fogDensity
@@ -176,13 +181,57 @@ public nonisolated struct DaySky: Sendable, Equatable {
         let (direction, elevation) = latitude.map { Self.sunDirection(at: hours, latitude: $0, yearPosition: yearPosition) }
             ?? Self.sunDirection(at: hours)
         let degrees = elevation * 180 / .pi
-        let key = Self.blend(Self.keys, at: degrees)
-        let moon = simd_normalize(SIMD3(-direction.x, max(-direction.y, 0.35), -direction.z))
+        var key = Self.blend(Self.keys, at: degrees)
+        // By night the light comes from the moon's side of the sky, never from under the horizon — a scene has to be
+        // judgeable — and, with a moon of its own, as bright as its phase: a new moon's night is darker than a full one's.
+        let (moonDirection, illumination) = moonPosition
+        let moon = simd_normalize(SIMD3(moonDirection.x, max(moonDirection.y, 0.35), moonDirection.z))
         let daylight = Self.smoothstep(-4, 4, degrees)
         let light = simd_normalize(direction * daylight + moon * (1 - daylight))
+        if moonAge != nil { key.sun *= daylight + (1 - daylight) * (0.35 + 0.65 * illumination) }
         return Lighting(direction: elevation > 0 ? direction : light,
                         colour: key.sun, zenith: key.zenith, horizon: key.horizon, ground: key.ground,
                         elevation: elevation)
+    }
+
+    // MARK: The night sky
+
+    /// The sun's direction and height, where it really is — not the light, which is the moon's by night.
+    public var sunPosition: (direction: SIMD3<Float>, elevation: Float) {
+        if let sun { return (sun.direction, sun.height * .pi / 180) }
+        let hours = Self.wrap(timeOfDay)
+        return latitude.map { Self.sunDirection(at: hours, latitude: $0, yearPosition: yearPosition) }
+            ?? Self.sunDirection(at: hours)
+    }
+
+    /// **The moon**: where it is and how much of its face is lit. It follows the sun's path across the sky, behind it by
+    /// its age — new beside the sun, full opposite it, rising about six hours later each quarter — and is lit on the side
+    /// facing the sun. Without ``moonAge``, full and opposite the sun.
+    public var moonPosition: (direction: SIMD3<Float>, illumination: Float) {
+        let age = moonAge ?? 0.5
+        let illumination = Float((1 - cos(age * 2 * .pi)) / 2)
+        guard moonAge != nil, sun == nil else { return (-sunPosition.direction, illumination) }
+        let hours = Self.wrap(timeOfDay - Float(age) * 24)
+        let direction = latitude.map { Self.sunDirection(at: hours, latitude: $0, yearPosition: yearPosition).direction }
+            ?? Self.sunDirection(at: hours).direction
+        return (direction, illumination)
+    }
+
+    /// **The night sky to draw** (``NightSky``): the stars turned about the pole for the latitude — the north star's
+    /// height is the latitude — by the hour and the year, as bright as the dark allows; the moon and the sun that lights it.
+    public var night: NightSky {
+        let sun = sunPosition
+        let moon = moonPosition
+        let phi = (latitude ?? 45) * .pi / 180
+        // The celestial pole: north (−z) raised by the latitude; below the horizon south of the equator.
+        let pole = simd_normalize(SIMD3<Float>(0, sin(phi), -cos(phi)))
+        // A sidereal day: the hour plus a day's turn through the year.
+        let turns = (Double(Self.wrap(timeOfDay)) / 24 + yearPosition / 4)
+        let angle = Float((turns - turns.rounded(.down)) * 2 * .pi)
+        let rotation = simd_float3x3(simd_quatf(angle: -angle, axis: pole))
+        let degrees = sun.elevation * 180 / .pi
+        return NightSky(starRotation: rotation, stars: Self.smoothstep(-2, -14, degrees), moon: moon.direction,
+                        sun: sun.direction, illumination: moon.illumination)
     }
 
     // MARK: Keyframes

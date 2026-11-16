@@ -107,6 +107,19 @@ public nonisolated struct GraphicsSettings: Equatable, Sendable, Codable {
     /// **Whether lying snow has depth on the ground where a world gives it some** (``Weather/snowDepth``) — off, the snow
     /// is the white layer alone. Low turns it off.
     public var snowDepth = true
+    /// **How clouds are drawn** (``CloudPass``): volumetric at full or reduced detail, or a flat layer. Low draws the flat
+    /// layer.
+    public var clouds: CloudQuality = .high
+
+    /// How clouds are drawn.
+    public enum CloudQuality: String, CaseIterable, Sendable, Codable {
+        /// A flat layer in the sky, lit and drifting, with no depth.
+        case flat
+        /// Volumetric, at a quarter of the screen's pixels and fewer steps.
+        case medium
+        /// Volumetric, at half the screen's width and height.
+        case high
+    }
 
     public static let drawDistanceRange: ClosedRange<Float> = 0.5...1
     public static let plantDensityRange: ClosedRange<Float> = 0.25...1
@@ -128,6 +141,7 @@ public nonisolated struct GraphicsSettings: Equatable, Sendable, Codable {
         reflections = (try? c.decodeIfPresent(Bool.self, forKey: .reflections)) ?? d.reflections
         textureQuality = (try? c.decodeIfPresent(TextureQuality.self, forKey: .textureQuality)) ?? d.textureQuality
         snowDepth = (try? c.decodeIfPresent(Bool.self, forKey: .snowDepth)) ?? d.snowDepth
+        clouds = (try? c.decodeIfPresent(CloudQuality.self, forKey: .clouds)) ?? d.clouds
     }
 
     /// **Clamped where it is used**, so a stale saved value cannot ask for something the screen never offers.
@@ -167,6 +181,7 @@ public nonisolated struct GraphicsSettings: Equatable, Sendable, Codable {
                 s.shadows = .low
                 s.drawDistance = 0.8
                 s.plantDensity = 0.75
+                s.clouds = .medium
             case .low:
                 s.antiAliasing = 1
                 s.shadows = .off
@@ -176,6 +191,7 @@ public nonisolated struct GraphicsSettings: Equatable, Sendable, Codable {
                 s.reflections = false
                 s.textureQuality = .half
                 s.snowDepth = false
+                s.clouds = .flat
             }
             return s
         }
@@ -197,7 +213,8 @@ public nonisolated struct GraphicsSettings: Equatable, Sendable, Codable {
         return "shadows \(shadows.rawValue), draw \(Int((drawDistance * 100).rounded()))%, "
             + "ground cover \(Int((plantDensity * 100).rounded()))%, scale \(scale), "
             + "\(antiAliasing)× anti-aliasing, reflections \(reflections ? "on" : "off"), "
-            + "textures \(textureQuality.rawValue), snow depth \(snowDepth ? "on" : "off"), \(frameRate) fps"
+            + "textures \(textureQuality.rawValue), snow depth \(snowDepth ? "on" : "off"), clouds \(clouds.rawValue), "
+            + "\(frameRate) fps"
     }
 
     // MARK: Ground cover
