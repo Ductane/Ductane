@@ -87,8 +87,13 @@ fragment float4 cloudFragment(CloudOut in [[stage_in]], constant CloudUniforms &
     if (t1 <= t0) return float4(0, 0, 0, 1);
     int steps = int(u.drift.z);
     float step = (t1 - t0) / float(steps);
-    // A different start in each pixel and frame, so the steps do not band.
-    float jitter = fract(52.9829189 * fract(dot(in.position.xy, float2(0.06711056, 0.00583715)) + u.drift.w * 0.618));
+    // A different start in each pixel and frame, so the steps do not band — a hash with no pattern of its own. An
+    // interleaved-gradient offset, meant to be averaged over frames, drew diagonal stripes through every cloud.
+    uint2 px = uint2(in.position.xy);
+    uint hj = (px.x * 73856093u) ^ (px.y * 19349663u) ^ (uint(u.drift.w) * 83492791u);
+    hj = hj * 747796405u + 2891336453u;
+    hj = ((hj >> ((hj >> 28) + 4u)) ^ hj) * 277803737u;
+    float jitter = float(((hj >> 22) ^ hj) & 0xFFFFu) / 65535.0;
     float3 L = normalize(u.light.xyz);
     float cosine = dot(dir, L);
     float g = 0.6, g2 = g * g;
