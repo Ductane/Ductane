@@ -1,6 +1,14 @@
 // swift-tools-version: 6.2
 import PackageDescription
 
+/// **`DuctaneCulling` built optimised in Debug too**, on a toolchain known to accept the flag in a dependency used by URL
+/// (see the target).
+#if compiler(>=6.4)
+let optimisedInDebug: [SwiftSetting] = [.unsafeFlags(["-O"], .when(configuration: .debug))]
+#else
+let optimisedInDebug: [SwiftSetting] = []
+#endif
+
 let package = Package(
     name: "Ductane",
     platforms: [.macOS(.v26)],
@@ -29,8 +37,6 @@ let package = Package(
             exclude: ["LICENSE"],
             // **Silenced by name, and through the safe setting rather than a compiler flag.** Xcode warns about
             // 64-to-32-bit conversions that Draco's own build does not, and the code is Google's, unmodified.
-            // `unsafeFlags` would do the same and make the package unusable by URL: SwiftPM refuses a dependency
-            // fetched from a repository if any target in it uses them.
             cxxSettings: [.headerSearchPath("src"), .disableWarning("shorten-64-to-32")]
         ),
         // Binomial's Basis Universal transcoder, for glTF's KHR_texture_basisu (KTX2 textures): C++, vendored
@@ -53,9 +59,24 @@ let package = Package(
             cxxSettings: [.headerSearchPath("src"), .define("BASISD_SUPPORT_KTX2", to: "1"),
                           .define("BASISD_SUPPORT_KTX2_ZSTD", to: "1")]
         ),
+        // **A world's per-frame loops, optimised in every configuration**: which of tens of thousands of placed and scattered
+        // copies a frame draws and casts (`WorldCopyField`), the ground's vertices, coarser levels and puddles, a mesh's
+        // triangles read back. Unoptimised, a 400 m zone of 48,000 copies spent 85 ms of every Debug frame here against 4
+        // optimised — a game run from Xcode's Run button would stutter on any real map. So this target alone is built with
+        // `-O` in Debug too. It calls nothing outside itself, so an unoptimised call in an inner loop cannot undo it; the
+        // only thing given up is stepping through it in a debugger.
+        //
+        // **`unsafeFlags` in a package used by URL**: SwiftPM used to refuse a versioned dependency with them. Checked on
+        // 2026-11-16 with Swift 6.4.2 (Xcode 27.2): `swift build`, `xcodebuild` on a package and an Xcode app project all
+        // resolve a tagged release served over HTTP whose target has unsafe flags, and apply `-O` after `-Onone`. On an
+        // older toolchain, which may refuse it, the target is built as everything else is (`optimisedInDebug`).
+        .target(
+            name: "DuctaneCulling",
+            swiftSettings: optimisedInDebug
+        ),
         .target(
             name: "Ductane",
-            dependencies: ["MeshOptimizer", "Draco", "Basis"],
+            dependencies: ["MeshOptimizer", "Draco", "Basis", "DuctaneCulling"],
             // Declared so SwiftPM synthesises `Bundle.module`, which the HUD and tone-map pipelines
             // load their shaders from. Xcode compiles the .metal into the same bundle as `default.metallib`;
             // SwiftPM's CLI does not compile Metal at all, which is why `swift test` can build the
@@ -63,7 +84,7 @@ let package = Package(
             resources: [.copy("HUDShaders.metal"), .copy("ToneMapShaders.metal"), .copy("SkyShaders.metal"),
                         .copy("ParticleShaders.metal"), .copy("DecalShaders.metal"), .copy("SkinningShaders.metal"),
                         .copy("BoundaryShaders.metal"), .copy("WaymarkShaders.metal"),
-                        .copy("WeatherShaders.metal"), .copy("FogShaders.metal"),
+                        .copy("WeatherShaders.metal"), .copy("FogShaders.metal"), .copy("WorldShaders.metal"),
                         // **What a game's own shaders include** (`#include "DuctaneWeather.h"`, this folder on the Metal
                         // compiler's header search path): what the weather does to its surfaces. Copied into the bundle as
                         // well, so a library compiled from source at run time (`ShaderLibrary`) can include it too.
@@ -108,7 +129,7 @@ let package = Package(
         ),
         .testTarget(
             name: "DuctaneTests",
-            dependencies: ["Ductane"],
+            dependencies: ["Ductane", "DuctaneCulling"],
             // A rig and a textured-material fixture, so the loaders are tested against real files
             // rather than mocks of them. Neither a skeleton nor a material's numbers need a GPU,
             // which is the whole reason `RigLoader` and `Material` are split from the halves that

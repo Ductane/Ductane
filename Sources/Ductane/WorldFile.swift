@@ -274,7 +274,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
             self.material = material
             self.look = look
         }
-        public struct Look: Codable, Equatable, Sendable {
+        public struct Look: Codable, Hashable, Sendable {
             public var texture: String
             public var colour: SIMD3<Float>
             public var intensity, tiling, falloff, albedoTiling: Float
@@ -305,7 +305,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         /// **A stylised water shader's numbers**: three colours by depth behind the surface, a scrolling sheet over it, a
         /// bright band and line along its shores, specks of foam, normals panning. Textures are named relative to the
         /// prop's own folder; colours are linear.
-        public struct Look: Codable, Equatable, Sendable {
+        public struct Look: Codable, Hashable, Sendable {
             public var shallow, deep, veryDeep: SIMD3<Float>
             public var deepHeight, veryDeepHeight, shallowsOpacity, baseOpacity: Float
             public var scrollTexture: String?

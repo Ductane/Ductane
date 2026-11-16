@@ -204,3 +204,24 @@ public nonisolated extension Weather {
         return SIMD4(Float(sin(heading)), Float(-cos(heading)), Float(travelled - (travelled / period).rounded(.down) * period), 0)
     }
 }
+
+public nonisolated extension FogFloor {
+    /// **Where ground fog pools over a world's ground and water**: a ground `resolution` cells a side and `size` metres
+    /// across, centred on the origin, its `(resolution + 1)²` heights row by row along +X; each body of water at its level
+    /// over every point its rectangles cover — a rectangle covers whole cells, so every point on or inside it.
+    init(heights: [Float], resolution: Int, size: Float, waters: [WorldFile.Water]) {
+        let n = resolution + 1, spacing = size / Float(resolution), half = size / 2
+        var water = [Float?](repeating: nil, count: n * n)
+        for body in waters {
+            for r in body.rectangles where r.count == 4 {
+                let x0 = max(Int(((r[0] + half) / spacing).rounded()), 0), x1 = min(Int(((r[2] + half) / spacing).rounded()), n - 1)
+                let z0 = max(Int(((r[1] + half) / spacing).rounded()), 0), z1 = min(Int(((r[3] + half) / spacing).rounded()), n - 1)
+                guard x0 <= x1, z0 <= z1 else { continue }
+                for z in z0...z1 {
+                    for x in x0...x1 { water[z * n + x] = max(water[z * n + x] ?? -.infinity, body.level) }
+                }
+            }
+        }
+        self.init(heights: heights, side: n, spacing: spacing, corner: SIMD2(-half, -half), water: water)
+    }
+}

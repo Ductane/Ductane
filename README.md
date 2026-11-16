@@ -48,7 +48,7 @@ swift run DuctaneSample
 - **Many copies** — instanced drawing, frustum culling and automatic level of detail
 - **Characters** — skinned animation from USD, skinned once a frame on the GPU, clips mixed and strides aligned, attachments, and a character controller
 - **Input** — keyboard, mouse and game controllers, with rebindable actions
-- **Worlds** — a scene package (`.usdz`) holding a world's props, ground, sky, water, effects, edges and markers, opened and unpacked for a game (`WorldPackage`)
+- **Worlds** — a scene package (`.usdz`) holding a world's props, ground, sky, water, effects, edges and markers, opened and unpacked for a game (`WorldPackage`) and drawn whole — ground, props, sky, weather, fog and seasons — by `WorldRenderer`
 - **Audio, particles, a HUD, levels and saving**
 
 Each has a guide in the [documentation](https://ductane.com/docs/start.html).
