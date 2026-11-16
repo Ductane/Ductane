@@ -27,16 +27,22 @@ struct DUFogUniforms {
     float4   groundFog;      // x density at its floor, per metre; y how high it lies; z the floor's base height; w 1 with a floor map
     float4   groundColour;   // rgb; w how much thicker over water
     float4   floorPlace;     // x, y the map's corner (x, z); z its size, metres; w unused
-    float4   drift;          // x, y how far the wind has carried the fog's wisps; z the haze the lights glow in, per metre
+    float4   drift;          // xyz where the wind has carried the fog's wisps (Weather.wisps(at:)); w the haze the lights glow in, per metre
     float4x4 cascades[4];
     float4   cascadeSplits;
     float4   cascadeDepthBias;
     float4   clouds;         // x coverage, y darkness, z base, w thickness
-    float4   cloudDrift;     // x, y
+    float4   cloudMotion;    // CloudLayer.motion: xy the way they travel, z how far
     float4   lightCount;     // x
     float4   lightPosition[16];  // xyz; w reach
     float4   lightColour[16];    // rgb
 };
+
+/// **Where a point of the world is on the clouds' pattern** — `CloudLayer.place(_:)`: in a frame turned to the way they
+/// travel, moved back by how far they have come.
+static float2 duCloudPlace(float2 p, float4 motion) {
+    return float2(dot(p, float2(-motion.y, motion.x)), dot(p, motion.xy) - motion.z);
+}
 
 static float duFogHash(float2 p) {
     p = fract(p * float2(0.1031, 0.1030));
@@ -44,11 +50,13 @@ static float duFogHash(float2 p) {
     return fract((p.x + p.y) * p.x);
 }
 
-/// Smooth value noise, 0…1.
-static float duFogNoise(float2 p) {
+/// Smooth value noise, 0…1, repeating every `period` cells — so the wisps' drift wraps with no seam.
+static float duFogNoise(float2 p, float period) {
     float2 i = floor(p), f = fract(p);
     float2 u = f * f * (3 - 2 * f);
-    float a = duFogHash(i), b = duFogHash(i + float2(1, 0)), c = duFogHash(i + float2(0, 1)), d = duFogHash(i + float2(1, 1));
+    float2 i0 = i - period * floor(i / period), i1 = i0 + 1;
+    i1 -= period * floor(i1 / period);
+    float a = duFogHash(i0), b = duFogHash(float2(i1.x, i0.y)), c = duFogHash(float2(i0.x, i1.y)), d = duFogHash(i1);
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
@@ -80,8 +88,9 @@ static float duGroundFogDepth(float3 a, float3 b, constant DUFogUniforms &u, tex
         float above = h * (exp(-max(lo, 0.0) / h) - exp(-max(hi, 0.0) / h));
         along = span / (hi - lo) * (below + above);
     }
-    float2 q = (mid.xz + u.drift.xy) / 18.0;
-    float wisps = 0.55 + 0.9 * (duFogNoise(q) * 0.65 + duFogNoise(q * 2.7 + 5.1) * 0.35);
+    // 18 m cells, 256 to `VolumetricFog.wispPeriod`; the finer octave three to each.
+    float2 q = duCloudPlace(mid.xz, u.drift) / 18.0;
+    float wisps = 0.55 + 0.9 * (duFogNoise(q, 256.0) * 0.65 + duFogNoise(q * 3.0 + 5.0, 768.0) * 0.35);
     return u.groundFog.x * (1 + water * u.groundColour.w) * along * wisps * inside;
 }
 
@@ -103,7 +112,7 @@ static float duFogCloudShadow(float3 p, constant DUFogUniforms &u, texture2d<flo
     constexpr sampler wrap(filter::linear, address::repeat);
     float3 l = u.sun.xyz;
     float mid = u.clouds.z + u.clouds.w * 0.4;
-    float2 q = p.xz + l.xz / max(l.y, 0.08) * (mid - p.y) + u.cloudDrift.xy;
+    float2 q = duCloudPlace(p.xz + l.xz / max(l.y, 0.08) * (mid - p.y), u.cloudMotion);
     float spread = map.sample(wrap, q / 61440.0, level(0)).r;
     float cover = smoothstep(1 - coverage - 0.12, 1 - coverage + 0.12, spread);
     return 1 - 0.75 * (1 - 0.8 * smoothstep(0.6, 1.0, coverage)) * cover;
@@ -167,7 +176,7 @@ kernel void duFogVolume(uint2 id [[thread_position_in_grid]],
             // the shafts.
             scattered += u.horizon.rgb * max(sunShare * phase * (sun - 1), -1.0) * worldThickness * span * seen;
             // The lights glow in whatever air there is.
-            float glowIn = ground + worldThickness + u.drift.z;
+            float glowIn = ground + worldThickness + u.drift.w;
             for (int k = 0; k < lights; ++k) {
                 float3 to = u.lightPosition[k].xyz - p;
                 float t = saturate(length(to) / max(u.lightPosition[k].w, 0.01));

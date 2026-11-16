@@ -185,3 +185,22 @@ public nonisolated struct FogFloor: Sendable, Equatable {
         return out
     }
 }
+
+public nonisolated extension Weather {
+    /// **How fast the fog's wisps drift**, metres a second: a calm night's air, which is when ground fog lies.
+    static let wispSpeed: Double = 0.6
+
+    /// **Where the fog's wisps are by `time`** — seconds on the world's clock: x, y the way they drift (a unit vector, x
+    /// east, y south), z how far, metres, within ``VolumetricFog/wispPeriod`` — what ``VolumetricFog/Frame/wisps`` takes.
+    /// Steadily along the world's prevailing wind (``prevailingHeading``), as the clouds travel, and read in a frame turned
+    /// to it, so turning the world's heading turns them rather than throwing them elsewhere. Never the wind of the moment
+    /// times the clock: a wind that changed moved the whole distance since the clock began at once, and the wisps jumped
+    /// about through every change of a schedule.
+    func wisps(at time: Double) -> SIMD4<Float> {
+        let heading = Double(prevailingHeading) * .pi / 180
+        let travelled = (time.isFinite ? time : 0) * Self.wispSpeed
+        let period = Double(VolumetricFog.wispPeriod)
+        // Toward the heading: 0 north (−z), 90 east (+x).
+        return SIMD4(Float(sin(heading)), Float(-cos(heading)), Float(travelled - (travelled / period).rounded(.down) * period), 0)
+    }
+}

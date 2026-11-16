@@ -150,6 +150,7 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
                               snowDepth: base.snowDepth, wetness: max(base.wetness, wet.surface),
                               puddles: max(base.wetness, wet.puddles), cloudShape: base.cloudShape, sway: base.sway,
                               dustColour: base.dustColour, groundFog: base.groundFog)
+        weather.windTurn = now.windTurn
         guard change > 0, time - now.start < change else { return weather }
         let before = spell(now.index - 1)
         let x = Float(min(max((time - now.start) / change, 0), 1))
@@ -157,7 +158,8 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
         let from = Weather.preset(before.kind, severity: before.severity)
         let to = Weather.preset(now.kind, severity: now.severity)
         weather.byHand = Self.blend(from, to, t)
-        weather.windHeading = base.windHeading + before.windTurn + (now.windTurn - before.windTurn) * t
+        weather.windTurn = before.windTurn + (now.windTurn - before.windTurn) * t
+        weather.windHeading = base.windHeading + weather.windTurn
         return weather
     }
 

@@ -61,8 +61,9 @@ public final class VolumetricFog {
         public var floor: FogFloor?
         public var floorTexture: MTLTexture?
         public var groundLevel: Float
-        /// How far the wind has carried the fog's wisps, metres.
-        public var drift: SIMD2<Float>
+        /// **Where the wind has carried the fog's wisps**: x, y the way they drift, z how far within
+        /// ``VolumetricFog/wispPeriod`` — give it ``Weather/wisps(at:)``.
+        public var wisps: SIMD4<Float>
         public var shadows: Shadows?
         /// The clouds, for their shadows, and the coverage map they are read from (``CloudPass/coverageMap``).
         public var clouds: CloudLayer?
@@ -72,7 +73,7 @@ public final class VolumetricFog {
         public init(viewProjection: simd_float4x4, eye: SIMD3<Float>, lighting: DaySky.Lighting, fogDensity: Float,
                     fogStart: Float = 0, groundFog: Float = 0, groundFogHeight: Float = 6,
                     groundFogColour: SIMD3<Float> = GroundFog.mist, floor: FogFloor? = nil, floorTexture: MTLTexture? = nil,
-                    groundLevel: Float = 0, drift: SIMD2<Float> = .zero, shadows: Shadows? = nil, clouds: CloudLayer? = nil,
+                    groundLevel: Float = 0, wisps: SIMD4<Float> = SIMD4(0, -1, 0, 0), shadows: Shadows? = nil, clouds: CloudLayer? = nil,
                     cloudMap: MTLTexture? = nil, lights: [Light] = []) {
             self.viewProjection = viewProjection
             self.eye = eye
@@ -85,7 +86,7 @@ public final class VolumetricFog {
             self.floor = floor
             self.floorTexture = floorTexture
             self.groundLevel = groundLevel
-            self.drift = drift
+            self.wisps = wisps
             self.shadows = shadows
             self.clouds = clouds
             self.cloudMap = cloudMap
@@ -124,7 +125,7 @@ public final class VolumetricFog {
         var cascadeSplits: SIMD4<Float>
         var cascadeDepthBias: SIMD4<Float>
         var clouds: SIMD4<Float>
-        var cloudDrift: SIMD4<Float>
+        var cloudMotion: SIMD4<Float>
         var lightCount: SIMD4<Float>
         var lightPosition: (SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>,
                             SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>,
@@ -145,6 +146,9 @@ public final class VolumetricFog {
     public nonisolated static let sunShare: Float = 0.6
     /// The thin haze the lights glow in even in clear air, per metre.
     public nonisolated static let haze: Float = 0.004
+    /// **The wisps' pattern repeats every this many metres** — 256 of their 18 m cells — so how far the wind has carried
+    /// them wraps there with no seam (``Weather/wispDrift(at:)``).
+    public nonisolated static let wispPeriod: Float = 18 * 256
 
     private let device: MTLDevice
     private let pipeline: MTLComputePipelineState
@@ -286,12 +290,12 @@ public final class VolumetricFog {
                              frame.floor?.base ?? frame.groundLevel, frame.floor != nil && frame.floorTexture != nil ? 1 : 0),
             groundColour: SIMD4(frame.groundFogColour, 0.6),
             floorPlace: SIMD4(frame.floor?.corner.x ?? 0, frame.floor?.corner.y ?? 0, max(frame.floor?.size ?? 1, 1), 0),
-            drift: SIMD4(frame.drift.x, frame.drift.y, Self.haze, 0),
+            drift: SIMD4(frame.wisps.x, frame.wisps.y, frame.wisps.z, Self.haze),
             cascades: (cascade(0), cascade(1), cascade(2), cascade(3)),
             cascadeSplits: frame.shadows?.splits ?? .zero,
             cascadeDepthBias: frame.shadows?.depthBias ?? .zero,
             clouds: frame.clouds.map { SIMD4($0.coverage, $0.darkness, $0.base, $0.thickness) } ?? .zero,
-            cloudDrift: SIMD4(frame.clouds?.drift.x ?? 0, frame.clouds?.drift.y ?? 0, 0, 0),
+            cloudMotion: frame.clouds?.motion ?? SIMD4(0, -1, 0, 0),
             lightCount: SIMD4(Float(min(frame.lights.count, Self.maxLights)), 0, 0, 0),
             lightPosition: (.zero, .zero, .zero, .zero, .zero, .zero, .zero, .zero,
                             .zero, .zero, .zero, .zero, .zero, .zero, .zero, .zero),

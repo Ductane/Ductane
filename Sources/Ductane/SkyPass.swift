@@ -24,7 +24,7 @@ public final class SkyPass {
         var starRow1: SIMD4<Float>
         var starRow2: SIMD4<Float>
         var clouds: SIMD4<Float>
-        var cloudDrift: SIMD4<Float>
+        var cloudMotion: SIMD4<Float>
         var aurora: SIMD4<Float>
         var rainbow: SIMD4<Float>
     }
@@ -119,7 +119,7 @@ public final class SkyPass {
                               starRow1: SIMD4(rotation.transpose.columns.1, 0),
                               starRow2: SIMD4(rotation.transpose.columns.2, 0),
                               clouds: layer.map { SIMD4($0.coverage, $0.darkness, $0.base, $0.thickness) } ?? .zero,
-                              cloudDrift: layer.map { SIMD4($0.drift.x, $0.drift.y, 0, 0) } ?? .zero,
+                              cloudMotion: layer?.motion ?? SIMD4(0, -1, 0, 0),
                               aurora: night.map { SIMD4($0.pole, $0.aurora) } ?? .zero,
                               rainbow: SIMD4(night == nil ? 0 : max(rainbow, 0), 0, 0, 0))
         let offset = frameSlot * Self.stride

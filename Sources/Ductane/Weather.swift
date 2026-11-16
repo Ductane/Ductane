@@ -111,6 +111,18 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
     /// **The world's own ground fog** (``GroundFog``): how much, how high it lies, its colour — the weather and the hour
     /// decide when it comes (``groundFogDensity(hour:)``).
     public var groundFog: GroundFog
+    /// **How far a schedule's spell has turned the wind from the world's own heading**, degrees — what ``current(at:)``
+    /// sets; 0 for weather as set. Never saved. The clouds aloft travel along the world's heading (``prevailingHeading``),
+    /// whatever the wind at the ground does.
+    public var windTurn: Float = 0
+    /// **The world's prevailing wind**: ``windHeading`` without a schedule's turn — the heading set for the world.
+    public var prevailingHeading: Float { windHeading - windTurn }
+
+    /// What a file holds: everything set for a world, never what a schedule worked out for a moment (``windTurn``).
+    enum CodingKeys: String, CodingKey {
+        case kind, severity, windHeading, byHand, seed, schedule, lyingSnow, snowDepth, wetness, puddles, cloudShape, sway
+        case dustColour, groundFog
+    }
 
     public init(kind: Kind = .clear, severity: Float = 0.5, windHeading: Float = 60, byHand: Settings? = nil,
                 seed: UInt32 = 1, schedule: WeatherSchedule? = nil, lyingSnow: Float = 0, snowDepth: Bool = false,

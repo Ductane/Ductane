@@ -20,6 +20,15 @@ static float duCoverage(texture2d<float> map, float2 p, float coverage) {
     return smoothstep(1.0 - coverage - 0.12, 1.0 - coverage + 0.12, spread);
 }
 
+/// **Where a point of the world is on the clouds' pattern** — `CloudLayer.place(_:)`: in a frame turned to the way they
+/// travel, moved back by how far they have come. Their coverage and their noise are read there.
+static float2 duCloudPlace(float2 p, float4 motion) {
+    return float2(dot(p, float2(-motion.y, motion.x)), dot(p, motion.xy) - motion.z);
+}
+
+/// The clouds' noise repeats every 61,440 / 28 m, so it wraps with the coverage map and the distance travelled.
+constant float duCloudNoiseScale = 61440.0 / 28.0;
+
 /// Mirrors `CloudPass.Uniforms`.
 struct CloudUniforms {
     float4x4 inverseViewProjection;
@@ -29,7 +38,9 @@ struct CloudUniforms {
     float4 zenith;
     float4 horizon;
     float4 clouds;       // x coverage, y darkness, z base, w thickness
-    float4 drift;        // xy metres; z steps; w frame, for the starting offset
+    float4 motion;       // CloudLayer.motion: xy the way they travel, z how far
+    float4 march;        // x steps; y frame, for the starting offset; z the new picture's share against the last (1 none of it)
+    float4x4 previousViewProjection;   // the last frame's, which a direction is found in its picture by
 };
 
 struct CloudOut {
@@ -51,13 +62,13 @@ static float cloudDensity(float3 p, constant CloudUniforms &u, texture3d<float> 
                           float detail) {
     float h = (p.y - u.clouds.z) / u.clouds.w;
     if (h <= 0.0 || h >= 1.0) return 0;
-    float2 q = p.xz + u.drift.xy;
+    float2 q = duCloudPlace(p.xz, u.motion);
     float local = duCoverage(map, q, u.clouds.x);
     if (local <= 0.001) return 0;
     // Taller towers where the cover is thick: the top falls away sooner where it is thin.
     float top = mix(0.45, 1.0, local);
     float shape = smoothstep(0.0, 0.12, h) * (1.0 - smoothstep(top * 0.55, top, h));
-    float3 w = float3(q.x, p.y * 1.6, q.y) / 2200.0;
+    float3 w = float3(q.x, p.y * 1.6, q.y) / duCloudNoiseScale;
     float base = noise.sample(s, w).r * shape;
     // Sharp-edged: what is over the threshold quickly becomes cloud, so a clear sky is clouds and blue, not haze. Broken
     // into separate clouds by the noise unless the sky is overcast, when the deck closes up.
@@ -75,8 +86,15 @@ static float cloudDensity(float3 p, constant CloudUniforms &u, texture3d<float> 
 /// much of the sky behind still shows. Through the layer from its base to its top, lit by a few steps toward the light
 /// (Beer's law, and the powder darkening of a cloud's sunlit flank), with a forward-scattering silver lining; darker when
 /// the weather is; faded into the horizon far off.
+///
+/// **Blended with the last frame's picture** (2026-11-16): a few dozen steps through kilometres of cloud, each pixel's
+/// started at its own offset, leave grain at every edge — drawn afresh each frame it shimmered like static. So each frame
+/// starts its steps a golden-ratio step further on and adds its picture to the last, found where the same direction was
+/// (clouds are far enough away that only the view's turning moves them on screen); the grain averages away. A frame
+/// with nothing to blend with — the first, a new size, a sudden change of light — is drawn alone.
 fragment float4 cloudFragment(CloudOut in [[stage_in]], constant CloudUniforms &u [[buffer(0)]],
-                              texture3d<float> noise [[texture(0)]], texture2d<float> map [[texture(1)]]) {
+                              texture3d<float> noise [[texture(0)]], texture2d<float> map [[texture(1)]],
+                              texture2d<float> previous [[texture(2)]]) {
     constexpr sampler s(filter::linear, address::repeat);
     float4 far = u.inverseViewProjection * float4(in.ndc, 0.5, 1);
     float3 dir = normalize(far.xyz / far.w - u.eye.xyz);
@@ -85,15 +103,16 @@ fragment float4 cloudFragment(CloudOut in [[stage_in]], constant CloudUniforms &
     float t0 = max((base - u.eye.y) / dir.y, 0.0), t1 = (top - u.eye.y) / dir.y;
     t1 = min(t1, t0 + 12000.0);
     if (t1 <= t0) return float4(0, 0, 0, 1);
-    int steps = int(u.drift.z);
+    int steps = int(u.march.x);
     float step = (t1 - t0) / float(steps);
-    // A different start in each pixel and frame, so the steps do not band — a hash with no pattern of its own. An
-    // interleaved-gradient offset, meant to be averaged over frames, drew diagonal stripes through every cloud.
+    // A different start in each pixel, so the steps do not band — a hash with no pattern of its own (an interleaved
+    // gradient drew diagonal stripes through every cloud) — moved on by the golden ratio each frame, so the frames
+    // blended together cover the step evenly.
     uint2 px = uint2(in.position.xy);
-    uint hj = (px.x * 73856093u) ^ (px.y * 19349663u) ^ (uint(u.drift.w) * 83492791u);
+    uint hj = (px.x * 73856093u) ^ (px.y * 19349663u);
     hj = hj * 747796405u + 2891336453u;
     hj = ((hj >> ((hj >> 28) + 4u)) ^ hj) * 277803737u;
-    float jitter = float(((hj >> 22) ^ hj) & 0xFFFFu) / 65535.0;
+    float jitter = fract(float(((hj >> 22) ^ hj) & 0xFFFFu) / 65536.0 + u.march.y * 0.6180339887);
     float3 L = normalize(u.light.xyz);
     float cosine = dot(dir, L);
     float g = 0.6, g2 = g * g;
@@ -124,7 +143,16 @@ fragment float4 cloudFragment(CloudOut in [[stage_in]], constant CloudUniforms &
     }
     // Far off, into the horizon's haze: what the sky's own gradient takes over.
     float fade = smoothstep(0.01, 0.12, dir.y) * exp(-t0 / 45000.0);
-    return float4(light * fade, mix(1.0, transmittance, fade));
+    float4 now = float4(light * fade, mix(1.0, transmittance, fade));
+    if (u.march.z >= 1.0) return now;
+    // Where this direction was in the last frame's picture: the clouds are kilometres off, so the eye's few metres of
+    // movement do not move them on screen — a direction (w 0) projects to where a point that far away would.
+    float4 c = u.previousViewProjection * float4(dir, 0);
+    if (c.w <= 1e-5) return now;
+    float2 uv = c.xy / c.w * float2(0.5, -0.5) + 0.5;
+    if (any(uv < 0.0) || any(uv > 1.0)) return now;
+    constexpr sampler last(filter::linear, address::clamp_to_edge);
+    return mix(previous.sample(last, uv), now, u.march.z);
 }
 
 // MARK: - The sky
@@ -145,7 +173,7 @@ struct SkyUniforms {
     float4 starRow1;
     float4 starRow2;
     float4 clouds;       // x coverage, y darkness, z base, w thickness
-    float4 cloudDrift;   // xy metres
+    float4 cloudMotion;  // CloudLayer.motion: xy the way they travel, z how far
     float4 aurora;       // xyz toward the pole it hangs over, level; w how strong tonight
     float4 rainbow;      // x how strong
 };
@@ -295,7 +323,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]], constant SkyUniforms &sky [[
         through = c.a;
     } else if (sky.night.y > 0.5 && up > 0.01) {
         float t = (sky.clouds.z + sky.clouds.w * 0.3 - sky.eye.y) / up;
-        float2 p = sky.eye.xz + direction.xz * t + sky.cloudDrift.xy;
+        float2 p = duCloudPlace(sky.eye.xz + direction.xz * t, sky.cloudMotion);
         float cover = duCoverage(map, p, sky.clouds.x);
         float2 toward = normalize(sky.sunDirection.xz + 1e-4) * 300.0;
         float shade = 1.0 - 0.5 * duCoverage(map, p + toward, sky.clouds.x);

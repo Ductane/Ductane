@@ -8,6 +8,11 @@ import simd
 /// underneath in rain, drifting with the wind. At ``GraphicsSettings/CloudQuality/flat`` there is no picture: ``SkyPass``
 /// draws a flat layer from the same coverage instead.
 ///
+/// **Each frame's picture is blended with the last** (2026-11-16), found where the same direction was: a frame's steps
+/// leave grain at every cloud's edge, which shimmered like static when each frame was drawn alone. A frame is drawn
+/// alone when there is no last picture to use — the first, a new size or quality, the light or the clouds changing at
+/// once (lightning's flash), the eye moving far in one frame.
+///
 /// **Before the scene pass**: ``encode(into:frameSlot:viewProjection:eye:lighting:layer:quality:width:height:)`` records
 /// its own render pass, and the picture it returns is what the frame's ``SkyPass`` reads.
 public final class CloudPass {
@@ -20,7 +25,9 @@ public final class CloudPass {
         var zenith: SIMD4<Float>
         var horizon: SIMD4<Float>
         var clouds: SIMD4<Float>
-        var drift: SIMD4<Float>
+        var motion: SIMD4<Float>
+        var march: SIMD4<Float>
+        var previousViewProjection: simd_float4x4
     }
     static let stride = (MemoryLayout<Uniforms>.stride + 255) & ~255
 
@@ -35,6 +42,11 @@ public final class CloudPass {
     /// One picture per frame in flight, so a frame still being drawn is never written over.
     private var pictures: [MTLTexture?] = Array(repeating: nil, count: FrameRenderer.maxFramesInFlight)
     private var frame: UInt32 = 0
+    /// **What the last frame drew**, for this one to blend with: its picture, its view, and what it was drawn under.
+    private var last: (picture: MTLTexture, viewProjection: simd_float4x4, eye: SIMD3<Float>, light: SIMD3<Float>,
+                       clouds: SIMD4<Float>)?
+    /// **The share of a new picture against the last** — the last one fades to under a tenth in about 20 frames.
+    public static let blend: Float = 0.12
 
     /// Everything the GPU must be able to reach: add it to the renderer's residency set — again after a picture is made
     /// anew (``picturesChanged``).
@@ -60,7 +72,7 @@ public final class CloudPass {
         pipeline = try compiler.makeRenderPipelineState(descriptor: descriptor)
         let tableDescriptor = MTL4ArgumentTableDescriptor()
         tableDescriptor.maxBufferBindCount = 1
-        tableDescriptor.maxTextureBindCount = 2
+        tableDescriptor.maxTextureBindCount = 3
         table = try device.makeArgumentTable(descriptor: tableDescriptor)
         guard let map = CloudLayer.coverageTexture(device: device) else { throw FrameRendererError.couldNotCreate("cloud map") }
         coverageMap = map
@@ -78,7 +90,7 @@ public final class CloudPass {
     public func encode(into commandBuffer: MTL4CommandBuffer, frameSlot: Int, viewProjection: simd_float4x4,
                        eye: SIMD3<Float>, lighting: DaySky.Lighting, layer: CloudLayer,
                        quality: GraphicsSettings.CloudQuality, width: Int, height: Int) -> MTLTexture? {
-        guard quality != .flat else { return nil }
+        guard quality != .flat else { last = nil; return nil }
         let divisor = quality == .high ? 2 : 4
         let w = max(width / divisor, 8), h = max(height / divisor, 8)
         let slot = frameSlot % pictures.count
@@ -93,11 +105,25 @@ public final class CloudPass {
         }
         guard let picture = pictures[slot] else { return nil }
         frame &+= 1
+        let clouds = SIMD4(layer.coverage, layer.darkness, layer.base, layer.thickness)
+        let light = lighting.colour
+        // The last picture, if this one may build on it: the same size, from a frame drawn just before, under the same
+        // light and clouds near enough — a change too sudden to blend into (lightning's flash, a new weather set by hand,
+        // a jump across the map) is drawn alone, so it never lags behind.
+        let previous = last.flatMap { last -> (picture: MTLTexture, viewProjection: simd_float4x4)? in
+            guard last.picture !== picture, last.picture.width == w, last.picture.height == h,
+                  simd_distance(last.eye, eye) < 100,
+                  simd_length(last.light - light) <= 0.05 * max(simd_length(light), simd_length(last.light), 0.05),
+                  simd_reduce_max(abs(last.clouds - clouds) / SIMD4(1, 1, 100, 100)) < 0.02 else { return nil }
+            return (last.picture, last.viewProjection)
+        }
+        last = (picture, viewProjection, eye, light, clouds)
         var values = Uniforms(inverseViewProjection: viewProjection.inverse, eye: SIMD4(eye, 1),
-                              light: SIMD4(lighting.direction, 0), lightColour: SIMD4(lighting.colour, 0),
+                              light: SIMD4(lighting.direction, 0), lightColour: SIMD4(light, 0),
                               zenith: SIMD4(lighting.zenith, 0), horizon: SIMD4(lighting.horizon, 0),
-                              clouds: SIMD4(layer.coverage, layer.darkness, layer.base, layer.thickness),
-                              drift: SIMD4(layer.drift.x, layer.drift.y, quality == .high ? 32 : 20, Float(frame % 64)))
+                              clouds: clouds, motion: layer.motion,
+                              march: SIMD4(quality == .high ? 32 : 20, Float(frame % 1024), previous == nil ? 1 : Self.blend, 0),
+                              previousViewProjection: previous?.viewProjection ?? viewProjection)
         let offset = slot * Self.stride
         uniforms.contents().advanced(by: offset).copyMemory(from: &values, byteCount: MemoryLayout<Uniforms>.size)
 
@@ -106,14 +132,18 @@ public final class CloudPass {
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         pass.colorAttachments[0].storeAction = .store
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return nil }
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { last = nil; return nil }
         encoder.label = "Clouds"
+        // The last frame's picture is read here, and this one is written over a picture an earlier frame's sky read: both
+        // must be finished first.
+        encoder.barrier(afterQueueStages: .fragment, beforeStages: .fragment, visibilityOptions: .device)
         encoder.setRenderPipelineState(pipeline)
         encoder.setCullMode(.none)
         encoder.setArgumentTable(table, stages: [.vertex, .fragment])
         table.setAddress(uniforms.gpuAddress + UInt64(offset), index: 0)
         table.setTexture(noise.gpuResourceID, index: 0)
         table.setTexture(coverageMap.gpuResourceID, index: 1)
+        table.setTexture((previous?.picture ?? coverageMap).gpuResourceID, index: 2)   // never the picture being drawn
         encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
         return picture

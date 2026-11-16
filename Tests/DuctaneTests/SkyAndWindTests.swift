@@ -11,21 +11,52 @@ import simd
 @Suite("Clouds, the night sky, wind and snow caps")
 struct SkyAndWindTests {
 
-    @Test("A clear sky has a few clouds, overcast nearly all; storms are dark; clouds drift with the wind and wrap")
+    @Test("A clear sky has a few clouds, overcast nearly all; storms are dark; clouds travel toward the heading and wrap")
     func clouds() {
         let clear = Weather.clear.clouds(at: 0)
         #expect(abs(clear.coverage - CloudLayer.fairWeather) < 1e-5)
         let overcast = Weather(kind: .overcast, severity: 1).clouds(at: 0)
         #expect(overcast.coverage > 0.9)
         #expect(Weather(kind: .storm, severity: 1).clouds(at: 0).darkness > 0.8)
-        // Toward the heading: east at 90°.
-        let east = Weather(kind: .clear, windHeading: 90).clouds(at: 100)
-        // A hair below zero wraps to the far end of the period: the same place on the pattern.
-        let north = min(abs(east.drift.y), Float(CloudLayer.period) - abs(east.drift.y))
-        #expect(east.drift.x > 0 && north < 1)
+        // Toward the heading: east at 90°. What was over a point is a second later as far east as they travel a second.
+        let weather = Weather(kind: .clear, windHeading: 90)
+        let p = SIMD2<Float>(300, -200)
+        let speed = Float(CloudLayer.speedAloft)
+        let moved = weather.clouds(at: 101).place(p + SIMD2(speed, 0)) - weather.clouds(at: 100).place(p)
+        #expect(simd_length(moved) < 1e-2, "\(moved)")
         // Years on the clock stay inside one period.
         let far = Weather(kind: .storm, severity: 1).clouds(at: 1.8e9)
-        #expect(abs(far.drift.x) <= Float(CloudLayer.period) && abs(far.drift.y) <= Float(CloudLayer.period))
+        #expect(far.motion.z >= 0 && far.motion.z < Float(CloudLayer.period))
+    }
+
+    @Test("Clouds and wisps move smoothly through every change of a schedule's wind, and across their wrap")
+    func steadyThroughChanges() throws {
+        let base = Weather(windHeading: 60, schedule: WeatherSchedule(seed: 9))
+        let schedule = try #require(base.schedule)
+        // A moment in a change's blend, when the wind turns and strengthens every frame: once the clouds' place was the
+        // wind's speed times every second since 1970, and a frame of the change threw them hundreds of kilometres.
+        let start = try #require((0..<400).lazy.map { schedule.spell(at: 1.79e9 + Double($0) * 600) }
+            .first { schedule.spell($0.index - 1).windTurn != $0.windTurn }).start
+        let a = base.current(at: start + 30), b = base.current(at: start + 30 + 1.0 / 60)
+        #expect(a.windHeading != b.windHeading, "not in a change")
+        let p = SIMD2<Float>(2500, -800)
+        let step = a.clouds(at: start + 30).place(p) - b.clouds(at: start + 30 + 1.0 / 60).place(p)
+        #expect(simd_length(step) < 1, "the clouds jumped \(simd_length(step)) m in a frame")
+        let wisps = simd_distance(a.wisps(at: start + 30), b.wisps(at: start + 30 + 1.0 / 60))
+        #expect(wisps < 0.1, "the wisps jumped \(wisps) m in a frame")
+        // The heading turned by a degree turns the pattern about the middle: a point near it moves metres, not kilometres.
+        var turned = base
+        turned.windHeading += 1
+        let near = simd_distance(base.clouds(at: 1.79e9).place(p), turned.clouds(at: 1.79e9).place(p))
+        #expect(near < 60, "\(near)")
+        // Across the wrap the pattern is the same: the coverage at a place a period on is the coverage there.
+        let layer = CloudLayer(coverage: 0.5, motion: SIMD4(0.6, 0.8, Float(CloudLayer.period) - 0.001, 0))
+        let wrapped = CloudLayer(coverage: 0.5, motion: SIMD4(0.6, 0.8, -0.001, 0))
+        for x in stride(from: Float(-3000), through: 3000, by: 750) {
+            let q = SIMD2(x, 1234)
+            #expect(abs(CloudLayer.coverage(at: layer.place(q), coverage: 0.5)
+                        - CloudLayer.coverage(at: wrapped.place(q), coverage: 0.5)) < 1e-3)
+        }
     }
 
     @Test("Coverage is about the share of the sky covered, repeats every period, and casts shadows")

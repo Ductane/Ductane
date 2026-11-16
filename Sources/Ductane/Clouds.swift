@@ -15,7 +15,7 @@ public nonisolated struct CloudShape: Sendable, Equatable, Codable {
     public var height: Float
     /// Metres from base to top — a storm's towers grow taller still.
     public var thickness: Float
-    /// How fast they travel, against the wind at the ground: 1 the engine's, twice the wind's speed.
+    /// How fast they travel: 1 the engine's, ``CloudLayer/speedAloft`` — 0 still, 3 three times as fast.
     public var speed: Float
 
     public init(height: Float = 1500, thickness: Float = 1200, speed: Float = 1) {
@@ -41,32 +41,52 @@ public nonisolated struct CloudShape: Sendable, Equatable, Codable {
 /// weather's — where their layer is and how far the wind has carried them. ``CloudPass`` draws them volumetric, or as a
 /// flat layer at Low quality; a renderer casts their shadows from the same coverage map (``coverageMap``).
 ///
-/// **One pattern everywhere**: the noise repeats every ``period`` metres, so ``drift`` wraps there with no seam and a clock
-/// of years stays precise.
+/// **They travel steadily along the world's prevailing wind** (2026-11-16), at ``speedAloft`` times the world's
+/// ``CloudShape/speed``, on the world's clock. Never at the wind of the moment: their place is how far they have travelled
+/// since the clock began, and a wind that changed — a schedule's spell turning or strengthening it — would have moved
+/// that whole distance at once, sending the clouds hundreds of kilometres each frame of the change. The wind aloft is
+/// steadier than the wind at the ground in the world as well.
+///
+/// **One pattern everywhere**, read in a frame turned to that wind (``place(_:)``): the noise repeats every ``period``
+/// metres, so the distance travelled wraps there with no seam and a clock of years stays precise, and turning the world's
+/// heading turns the pattern about the world's middle rather than throwing it somewhere else.
 public nonisolated struct CloudLayer: Sendable, Equatable {
     /// How much of the sky they cover, 0…1.
     public var coverage: Float
     /// How dark they are underneath, 0 white … 1 a storm's.
     public var darkness: Float
-    /// How far the wind has carried them, metres (x east, z south), within one ``period``.
-    public var drift: SIMD2<Float>
+    /// **Where they are on their pattern**: x, y the way they travel (a unit vector, x east, y south); z how far they have
+    /// travelled along it, metres, within one ``period``. What a shader reads them by (`duCloudPlace`), with ``place(_:)``.
+    public var motion: SIMD4<Float>
     /// Their base and their thickness, metres — a storm's towers taller than the world's own.
     public var base: Float
     public var thickness: Float
 
-    public init(coverage: Float, darkness: Float = 0, drift: SIMD2<Float> = .zero, base: Float = 1500,
+    public init(coverage: Float, darkness: Float = 0, motion: SIMD4<Float> = SIMD4(0, -1, 0, 0), base: Float = 1500,
                 thickness: Float = 1200) {
         self.coverage = coverage.isFinite ? min(max(coverage, 0), 1) : 0
         self.darkness = darkness.isFinite ? min(max(darkness, 0), 1) : 0
-        self.drift = all(drift .== drift) ? drift : .zero
+        let way = SIMD2(motion.x, motion.y)
+        let length = simd_length(way)
+        self.motion = length.isFinite && length > 1e-6 && motion.z.isFinite
+            ? SIMD4(way.x / length, way.y / length, motion.z, 0) : SIMD4(0, -1, 0, 0)
         self.base = base.isFinite ? max(base, 0) : 1500
         self.thickness = thickness.isFinite ? max(thickness, 50) : 1200
     }
 
     /// The pattern repeats every this many metres in both directions: thirty cells of the coarsest noise, 2,048 m each.
     public static let period: Double = 61_440
-    /// How much faster than the wind at the ground the clouds go at ``CloudShape/speed`` 1 — the wind is stronger up there.
-    public static let windAloft: Double = 2
+    /// **How fast they travel at ``CloudShape/speed`` 1**, metres a second: a moderate wind aloft, about 0.3° a second
+    /// overhead at their usual height.
+    public static let speedAloft: Double = 8
+
+    /// **Where a point of the world is on their pattern** (x, z metres): in a frame turned to the way they travel, moved
+    /// back by how far they have come — what `duCloudPlace` works out in a shader, and what ``coverage(at:coverage:)``
+    /// and the noise are read at.
+    public func place(_ p: SIMD2<Float>) -> SIMD2<Float> {
+        let way = SIMD2(motion.x, motion.y)
+        return SIMD2(simd_dot(p, SIMD2(-way.y, way.x)), simd_dot(p, way) - motion.z)
+    }
     /// **How much of a clear sky still has clouds**: a few fair-weather ones, so a clear day is not an empty dome.
     public static let fairWeather: Float = 0.22
 
@@ -79,7 +99,7 @@ public nonisolated struct CloudLayer: Sendable, Equatable {
         let up = max(light.y, 0.08)
         let p = SIMD2(point.x, point.z) + SIMD2(light.x, light.z) / up * (mid - point.y)
         let strength = 0.75 * (1 - 0.8 * Self.smoothstep(0.6, 1, coverage))
-        return 1 - strength * Self.coverage(at: p + drift, coverage: coverage)
+        return 1 - strength * Self.coverage(at: place(p), coverage: coverage)
     }
 
     /// **The clouds' coverage at a point of their layer**, 0…1: the ``coverageMap`` read there, spread so `coverage` is
@@ -176,22 +196,20 @@ public nonisolated extension Weather {
 
     /// **The clouds at `time`** — seconds on the weather's clock, the same one a schedule and lightning run by: covering
     /// the sky as the weather's cloud cover says, from ``CloudLayer/fairWeather`` on a clear day to all of it; dark as rain
-    /// gets heavy and in a storm, whose towers rise half as tall again; carried along the wind's heading.
+    /// gets heavy and in a storm, whose towers rise half as tall again; carried steadily along the world's prevailing wind
+    /// (``CloudLayer``, ``prevailingHeading``), so a wind that changes never throws them about.
     func clouds(at time: Double) -> CloudLayer {
         let s = settings
         let coverage = CloudLayer.fairWeather + (1 - CloudLayer.fairWeather) * s.cloudCover
         let storm: Float = kind == .storm || s.lightning > 0 ? 0.25 : 0
         let darkness = min(s.precipitation * (s.snow ? 0.35 : 0.7) + max(s.cloudCover - 0.55, 0) * 0.6 + storm, 1)
-        let heading = Double(windHeading) * .pi / 180
-        let speed = Double(max(s.windSpeed, 1.5)) * CloudLayer.windAloft * Double(cloudShape.speed)
-        let travelled = (time.isFinite ? time : 0) * speed
-        func wrapped(_ x: Double) -> Float {
-            let p = CloudLayer.period
-            return Float(x - (x / p).rounded(.down) * p)
-        }
+        let heading = Double(prevailingHeading) * .pi / 180
+        let travelled = (time.isFinite ? time : 0) * CloudLayer.speedAloft * Double(cloudShape.speed)
+        let p = CloudLayer.period
+        let along = Float(travelled - (travelled / p).rounded(.down) * p)
         // Toward the heading: 0 north (−z), 90 east (+x).
         return CloudLayer(coverage: coverage, darkness: darkness,
-                          drift: SIMD2(wrapped(sin(heading) * travelled), wrapped(-cos(heading) * travelled)),
+                          motion: SIMD4(Float(sin(heading)), Float(-cos(heading)), along, 0),
                           base: cloudShape.height, thickness: cloudShape.thickness * (storm > 0 ? 1.5 : 1))
     }
 
