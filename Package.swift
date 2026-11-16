@@ -63,7 +63,11 @@ let package = Package(
             resources: [.copy("HUDShaders.metal"), .copy("ToneMapShaders.metal"), .copy("SkyShaders.metal"),
                         .copy("ParticleShaders.metal"), .copy("DecalShaders.metal"), .copy("SkinningShaders.metal"),
                         .copy("BoundaryShaders.metal"), .copy("WaymarkShaders.metal"),
-                        .copy("WeatherShaders.metal"), .copy("FogShaders.metal")],
+                        .copy("WeatherShaders.metal"), .copy("FogShaders.metal"),
+                        // **What a game's own shaders include** (`#include "DuctaneWeather.h"`, this folder on the Metal
+                        // compiler's header search path): what the weather does to its surfaces. Copied into the bundle as
+                        // well, so a library compiled from source at run time (`ShaderLibrary`) can include it too.
+                        .copy("ShaderHeaders/DuctaneWeather.h")],
             swiftSettings: [
                 // Matches the game targets: everything is main-actor by default unless it says
                 // otherwise. Engine types that must run off the main thread say `nonisolated`

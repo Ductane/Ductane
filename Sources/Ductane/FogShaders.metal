@@ -7,8 +7,8 @@
 //  lights. One thread a column marches its slices front to back and writes, at each, the light the air so far sends
 //  toward the eye and how much of what is behind still shows through the ground fog.
 //
-//  A renderer reads it (`duFogApply`, below — copy it into the shaders that draw surfaces) at a surface's place on the
-//  screen and its distance from the eye.
+//  A renderer's surfaces read it (`duFogApply` in `ShaderHeaders/DuctaneWeather.h`) at their place on the screen and
+//  their distance from the eye; `FogSkyPass` lays the sky's picture over the sky (`duFogSkyVertex`, below).
 //
 
 #include <metal_stdlib>
@@ -196,18 +196,28 @@ kernel void duFogVolume(uint2 id [[thread_position_in_grid]],
     }
 }
 
-/// **Laying the volume over a surface** — copy into a renderer's shaders. `lookup` is ``VolumetricFog/Lookup``'s
-/// `parameters`: x 1 with a volume, y the first slice's near edge, z log(far / near), w slices. `colour` is the surface
-/// already fogged by the world's own fog; `distance` how far it is from the eye (a pixel of sky: the lookup's
-/// `skyDistance`). The volume's cell holds what the air up to its far edge sends toward the eye, and how much of what is
-/// behind still shows through the ground fog.
-static inline float3 duFogApply(float3 colour, float3 worldPosition, float distance, float4x4 viewProjection, float4 lookup,
-                         texture3d<float> volume) {
-    if (lookup.x < 0.5) return colour;
+// MARK: - Fog over the sky (`FogSkyPass`)
+
+struct DUFogSkyOut {
+    float4 position [[position]];
+    float2 ndc;
+};
+
+/// **The volume over the sky** (2026-11-16): a triangle over the screen at the far plane, drawn where nothing solid is —
+/// reversed-Z, the depth test passes only where the depth was left clear — so ground fog and light in the haze stand in
+/// front of the sky too. Blended: what the air sends added, the sky kept by what shows through.
+vertex DUFogSkyOut duFogSkyVertex(uint id [[vertex_id]]) {
+    float2 p = float2((id << 1) & 2, id & 2) * 2.0 - 1.0;
+    DUFogSkyOut out;
+    out.position = float4(p, 0, 1);
+    out.ndc = p;
+    return out;
+}
+
+fragment float4 duFogSkyFragment(DUFogSkyOut in [[stage_in]],
+                                 texture2d<float> fogSkyPicture [[texture(0)]]) {
     constexpr sampler cells(filter::linear, address::clamp_to_edge);
-    float4 clip = viewProjection * float4(worldPosition, 1);
-    float2 uv = clip.xy / max(clip.w, 1e-5) * float2(0.5, -0.5) + 0.5;
-    float slice = log(max(distance, 1e-3) / lookup.y) / lookup.z * lookup.w - 1;
-    float4 cell = volume.sample(cells, float3(uv, (slice + 0.5) / lookup.w));
-    return colour * cell.a + cell.rgb;
+    // The engine's picture for the sky (`VolumetricFog.Drawn.sky`): the light in front of it without the shafts'
+    // darkening of the world's fog, which the sky — never fogged by it — has nothing to lose.
+    return fogSkyPicture.sample(cells, in.ndc * float2(0.5, -0.5) + 0.5);
 }

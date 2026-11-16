@@ -56,6 +56,27 @@ public nonisolated enum ShaderLibrary {
             throw ShaderLibraryError.noSource(named: sourceNamed, bundle: bundle.bundlePath)
         }
         let source = try String(contentsOf: url, encoding: .utf8)
-        return try device.makeLibrary(source: source, options: nil)
+        return try device.makeLibrary(source: withEngineHeaders(source), options: nil)
+    }
+
+    /// The headers a game's shaders may include from the engine (`ShaderHeaders/`).
+    public static let engineHeaders = ["DuctaneWeather.h"]
+
+    /// **`source` with the engine's headers written in where it includes them** — for compiling a game's shaders from
+    /// source at run time, where there is no header search path: Xcode finds `#include "DuctaneWeather.h"` through
+    /// `MTL_HEADER_SEARCH_PATHS`, `makeLibrary(source:)` finds nothing. Each header is written in once.
+    public static func withEngineHeaders(_ source: String) -> String {
+        var written = Set<String>()
+        return source.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("#include"),
+                  let name = engineHeaders.first(where: { trimmed.contains("\"\($0)\"") || trimmed.contains("<\($0)>") })
+            else { return String(line) }
+            guard written.insert(name).inserted else { return "" }
+            let base = (name as NSString).deletingPathExtension
+            guard let url = Bundle.module.url(forResource: base, withExtension: "h"),
+                  let header = try? String(contentsOf: url, encoding: .utf8) else { return String(line) }
+            return header
+        }.joined(separator: "\n")
     }
 }

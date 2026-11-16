@@ -98,7 +98,7 @@ public final class VolumetricFog {
         public var isEmpty: Bool { groundFog <= 0 && fogDensity <= 0 && lights.isEmpty }
     }
 
-    /// **What a shader needs to read the volume** — `duFogApply` in `FogShaders.metal`, which a renderer copies: x 1 when
+    /// **What a shader needs to read the volume** — `duFogApply` in `DuctaneWeather.h` (``WeatherSurface/fogVolume``): x 1 when
     /// there is a volume, y the first slice's near edge, z log(far / near), w the slices; and the distance a pixel of sky
     /// reads it at (``skyDistance(fogDensity:fogStart:)``).
     public nonisolated struct Lookup: Sendable, Equatable {
@@ -235,7 +235,7 @@ public final class VolumetricFog {
         /// Surfaces read it (`duFogApply`).
         public var volume: MTLTexture
         /// A cell a column, read over the sky where nothing solid was drawn: what the air sends added, the sky kept by its
-        /// alpha — at the screen's place, with no depth to look up.
+        /// alpha — at the screen's place, with no depth to look up. ``FogSkyPass`` lays it there.
         public var sky: MTLTexture
         public var lookup: Lookup
     }
