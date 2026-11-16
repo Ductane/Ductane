@@ -266,13 +266,17 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
                 kept[season] = (chances[season] ?? [:]).compactMapValues { $0.isFinite && $0 > 0 ? $0 : nil }
             }
             self.chances = kept
-            if case .cycle(let length) = calendar, !(length.isFinite && length > 0) {
-                self.calendar = .date
+            // A season of no length, or a minute's — a file can say anything — would divide the clock into nothing.
+            if case .cycle(let length) = calendar {
+                self.calendar = length.isFinite && length > 0 ? .cycle(seasonLength: max(length, Self.shortestSeason)) : .date
             } else {
                 self.calendar = calendar
             }
             self.southern = southern
         }
+
+        /// The shortest a game's season may be, seconds.
+        public static let shortestSeason: Double = 60
 
         /// Snow and fog in winter, rain in spring, clear skies and storms in summer, rain and fog in autumn.
         public static let standardChances: [Season: [Weather.Kind: Float]] = [
@@ -284,6 +288,12 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
 
         /// Where in the year `time` is, 0…4: 0 winter's middle, 1 spring's, 2 summer's, 3 autumn's, part way between.
         public func position(at time: Double) -> Double {
+            let p = unguardedPosition(at: time)
+            // Never anything an `Int` cannot hold: a position that is not a number is winter's middle.
+            return p.isFinite ? min(max(p, 0), 3.999_999) : 0
+        }
+
+        private func unguardedPosition(at time: Double) -> Double {
             let t = time.isFinite ? time : 0
             switch calendar {
             case .held(let season):

@@ -203,6 +203,15 @@ struct WeatherScheduleTests {
         let week = WeatherSchedule.Seasons(calendar: .cycle(seasonLength: 7 * 86_400))
         #expect(week.season(at: 0) == .winter && week.season(at: 7 * 86_400) == .spring && week.season(at: 28 * 86_400) == .winter)
         #expect(WeatherSchedule.Seasons(calendar: .cycle(seasonLength: -1)).calendar == .date)
+        // A file can say anything: a season too short to divide by, or a clock at its limits, never crashes.
+        let tiny = WeatherSchedule.Seasons(calendar: .cycle(seasonLength: 1e-300))
+        #expect(tiny.calendar == .cycle(seasonLength: WeatherSchedule.Seasons.shortestSeason))
+        for time in [0, 1e300, -1e300, .greatestFiniteMagnitude, .infinity, .nan] {
+            _ = tiny.season(at: time)
+            _ = north.season(at: time)
+            _ = WeatherSchedule(seasons: tiny).warmth(at: time)
+            #expect((0..<4).contains(north.position(at: time)))
+        }
     }
 
     @Test("Chances and warmth turn gradually all year: mid-season its own, between a mix, no jump from one day to the next")
