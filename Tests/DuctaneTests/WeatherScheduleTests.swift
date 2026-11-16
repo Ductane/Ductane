@@ -179,4 +179,88 @@ struct WeatherScheduleTests {
         // Low graphics turn the depth off.
         #expect(GraphicsSettings().snowDepth && !GraphicsSettings.Preset.low.settings.snowDepth)
     }
+
+    // MARK: Seasons
+
+    /// Midday UTC on a date.
+    private static func date(_ year: Int, _ month: Int, _ day: Int) -> Double {
+        var c = DateComponents()
+        c.year = year; c.month = month; c.day = day; c.hour = 12
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        return calendar.date(from: c)!.timeIntervalSince1970
+    }
+
+    @Test("The season follows the date — winter in January north, summer south — or is held, or runs a game's calendar")
+    func seasons() {
+        let north = WeatherSchedule.Seasons()
+        #expect(north.season(at: Self.date(2027, 1, 15)) == .winter)
+        #expect(north.season(at: Self.date(2027, 4, 15)) == .spring)
+        #expect(north.season(at: Self.date(2027, 7, 15)) == .summer)
+        #expect(north.season(at: Self.date(2027, 10, 15)) == .autumn)
+        #expect(WeatherSchedule.Seasons(southern: true).season(at: Self.date(2027, 1, 15)) == .summer)
+        #expect(WeatherSchedule.Seasons(calendar: .held(.winter)).season(at: Self.date(2027, 7, 15)) == .winter)
+        let week = WeatherSchedule.Seasons(calendar: .cycle(seasonLength: 7 * 86_400))
+        #expect(week.season(at: 0) == .winter && week.season(at: 7 * 86_400) == .spring && week.season(at: 28 * 86_400) == .winter)
+        #expect(WeatherSchedule.Seasons(calendar: .cycle(seasonLength: -1)).calendar == .date)
+    }
+
+    @Test("Chances and warmth turn gradually all year: mid-season its own, between a mix, no jump from one day to the next")
+    func gradual() throws {
+        let schedule = WeatherSchedule(seasons: WeatherSchedule.Seasons())
+        let jan = try #require(schedule.warmth(at: Self.date(2027, 1, 15)))
+        let jul = try #require(schedule.warmth(at: Self.date(2027, 7, 15)))
+        #expect(jan < 0.02 && jul > 0.98)
+        let midWinter = schedule.chances(at: Self.date(2027, 1, 15))
+        #expect((midWinter[.snow] ?? 0) > 0.28 && midWinter[.storm] == nil)
+        let lateFeb = schedule.chances(at: Self.date(2027, 2, 28))
+        #expect((lateFeb[.snow] ?? 0) > 0 && (lateFeb[.rain] ?? 0) > 0, "late winter has a little spring in it")
+        var day = Self.date(2027, 1, 1)
+        var last = schedule.warmth(at: day)!
+        for _ in 0..<365 {
+            day += 86_400
+            let now = schedule.warmth(at: day)!
+            #expect(abs(now - last) < 0.02, "no jump on any date")
+            last = now
+        }
+        #expect(WeatherSchedule().warmth(at: 0) == nil && WeatherSchedule().chances(at: 0) == WeatherSchedule().chances)
+    }
+
+    @Test("No snow in summer: its spells never snow, a snow spell when warm falls as rain, and lying snow thaws")
+    func summer() {
+        let summer = WeatherSchedule(seasons: WeatherSchedule.Seasons(calendar: .held(.summer)))
+        #expect((0..<2000).allSatisfy { summer.spell(Int64($0)).kind != .snow })
+        let snowyAllYear = WeatherSchedule.Seasons(chances: [.winter: [.snow: 1], .spring: [.snow: 1], .summer: [.snow: 1],
+                                                             .autumn: [.snow: 1]], calendar: .held(.summer))
+        let warmSnow = WeatherSchedule(seasons: snowyAllYear)
+        #expect((0..<200).allSatisfy { warmSnow.spell(Int64($0)).kind == .rain }, "too warm to snow")
+        var cold = snowyAllYear
+        cold.calendar = .held(.winter)
+        #expect(WeatherSchedule(seasons: cold).spell(5).kind == .snow)
+        // Melting: far faster in summer than in winter.
+        #expect(WeatherSchedule.meltFactor(warmth: 1) > WeatherSchedule.meltFactor(warmth: 0) * 20)
+        #expect(WeatherSchedule.meltFactor(warmth: nil) == 1)
+        // The snow set lying is winter's: held in summer, none lies.
+        let base = Weather(schedule: summer, lyingSnow: 0.8)
+        #expect(base.current(at: Self.now).lyingSnow == 0)
+        let winter = Weather(schedule: WeatherSchedule(seasons: WeatherSchedule.Seasons(calendar: .held(.winter))), lyingSnow: 0.8)
+        #expect(winter.current(at: Self.now).lyingSnow >= 0.8)
+    }
+
+    @Test("Seasons are written and read back; a schedule without them reads without")
+    func seasonsCoding() throws {
+        for calendar: WeatherSchedule.Seasons.Calendar in [.date, .held(.autumn), .cycle(seasonLength: 3600)] {
+            var chances = WeatherSchedule.Seasons.standardChances
+            chances[.spring] = [.fog: 3, .rain: 1]
+            let schedule = WeatherSchedule(seed: 9, seasons: WeatherSchedule.Seasons(chances: chances, calendar: calendar,
+                                                                                    southern: true))
+            let read = try JSONDecoder().decode(WeatherSchedule.self, from: JSONEncoder().encode(schedule))
+            #expect(read == schedule)
+        }
+        let plain = try JSONDecoder().decode(WeatherSchedule.self, from: JSONEncoder().encode(WeatherSchedule()))
+        #expect(plain.seasons == nil)
+        let odd = #"{"seasons":{"calendar":"monsoon","chances":{"winter":{"snow":2,"hail":1},"wet":{"rain":1}}}}"#
+        let read = try JSONDecoder().decode(WeatherSchedule.self, from: Data(odd.utf8))
+        #expect(read.seasons?.calendar == .date && read.seasons?.chances[.winter] == [.snow: 2])
+    }
 }

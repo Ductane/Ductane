@@ -36,10 +36,14 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
     public var wander: Float
     /// Where the spells start: one seed, one sequence of weather.
     public var seed: UInt32
+    /// **Seasons**, when the year changes the weather: each season's own chances in place of ``chances``, and warmth.
+    /// Nil is one set of chances all year.
+    public var seasons: Seasons?
 
     public init(isOn: Bool = true, chances: [Weather.Kind: Float] = Self.standardChances,
                 shortest: Double = 10 * 60, longest: Double = 30 * 60, change: Double = 2 * 60,
-                lightest: Float = 0.2, heaviest: Float = 0.8, wander: Float = 45, seed: UInt32 = 1) {
+                lightest: Float = 0.2, heaviest: Float = 0.8, wander: Float = 45, seed: UInt32 = 1,
+                seasons: Seasons? = nil) {
         self.isOn = isOn
         self.chances = chances.compactMapValues { $0.isFinite && $0 > 0 ? $0 : nil }
         let short = shortest.isFinite ? min(max(shortest, Self.spellLengths.lowerBound), Self.spellLengths.upperBound) : 600
@@ -51,6 +55,7 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
         self.heaviest = min(max(heaviest.isFinite ? heaviest : 0.8, low), 1)
         self.wander = min(max(wander.isFinite ? wander : 45, 0), 180)
         self.seed = seed
+        self.seasons = seasons
     }
 
     /// Clear half the time, then overcast, rain and the odd storm.
@@ -109,8 +114,17 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
         return spells
     }
 
-    /// The kind spell `index` is, by the chances; clear when none is given.
+    /// The kind spell `index` is, by the chances when it begins — the season's, with seasons — clear when none is given.
+    /// **Snow falls as rain when it is warm** (``warmth(at:)`` over 0.7).
     func kind(_ index: Int64) -> Weather.Kind {
+        let start = boundary(index)
+        let picked = pick(index, from: chances(at: start))
+        if picked == .snow, let warm = warmth(at: start), warm > 0.7 { return .rain }
+        return picked
+    }
+
+    /// One kind from `chances`, by spell `index`'s own number.
+    private func pick(_ index: Int64, from chances: [Weather.Kind: Float]) -> Weather.Kind {
         let shares = Weather.Kind.allCases.map { (kind: $0, share: chances[$0] ?? 0) }
         let total = shares.reduce(0) { $0 + $1.share }
         guard total > 0 else { return .clear }
@@ -128,8 +142,10 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
     /// its severity, the wind turned, and in a spell's first ``change`` seconds a blend from the spell before.
     public func weather(at time: Double, under base: Weather) -> Weather {
         let now = spell(at: time)
+        // The snow set lying is the least that lies — in winter: with seasons it thaws away toward summer.
+        let cold = warmth(at: time).map { 1 - Self.smooth(0.3, 0.7, $0) } ?? 1
         var weather = Weather(kind: now.kind, severity: now.severity, windHeading: base.windHeading + now.windTurn,
-                              seed: base.seed, lyingSnow: max(base.lyingSnow, builtSnow(at: time)),
+                              seed: base.seed, lyingSnow: max(base.lyingSnow * cold, builtSnow(at: time)),
                               snowDepth: base.snowDepth)
         guard change > 0, time - now.start < change else { return weather }
         let before = spell(now.index - 1)
@@ -161,10 +177,10 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
     /// start of the spell under way is worked out once and remembered (``SnowLaid``) — counting back two days of spells on
     /// every call, ten calls a frame, took an editor showing a scheduled world from 60 frames a second to 2.
     public func builtSnow(at time: Double) -> Float {
-        guard time.isFinite, (chances[.snow] ?? 0) > 0 else { return 0 }
+        guard time.isFinite, mayLaySnow else { return 0 }
         let now = spell(at: time)
         let start = SnowLaid.shared.snow(of: self, atStartOf: now.index) { snowLaid(before: now) }
-        return Float(Self.laid(start, in: now, for: max(time - now.start, 0)))
+        return Float(Self.laid(start, in: now, for: max(time - now.start, 0), warmth: warmth(at: now.start)))
     }
 
     /// The snow laid by the start of `spell`, counted over the ``snowMemory`` before it.
@@ -173,19 +189,152 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
         var each = self.spell(at: t)
         var snow = 0.0
         for _ in 0..<100_000 where each.index < spell.index {
-            snow = Self.laid(snow, in: each, for: max(min(each.end, spell.start) - t, 0))
+            snow = Self.laid(snow, in: each, for: max(min(each.end, spell.start) - t, 0), warmth: warmth(at: each.start))
             t = each.end
             each = self.spell(each.index + 1)
         }
         return snow
     }
 
-    /// `snow` after `seconds` of `spell`: built as hard as it snows, else melted, faster in rain.
-    static func laid(_ snow: Double, in spell: Spell, for seconds: Double) -> Double {
+    /// `snow` after `seconds` of `spell`: built as hard as it snows, else melted, faster in rain — and, with seasons,
+    /// faster as it warms (``meltFactor(warmth:)``).
+    static func laid(_ snow: Double, in spell: Spell, for seconds: Double, warmth: Float? = nil) -> Double {
         let falling = Weather.preset(spell.kind, severity: spell.severity)
         let p = Double(falling.precipitation)
         if p > 0, falling.snow { return min(1, snow + p * snowBuilds * seconds) }
-        return max(0, snow - (snowMelts + p * rainMelts) * seconds)
+        return max(0, snow - (snowMelts * meltFactor(warmth: warmth) + p * rainMelts) * seconds)
+    }
+
+    /// **How much faster snow melts at a warmth** than ``snowMelts``: half as fast in the middle of winter (four hours),
+    /// two and a half times in spring and autumn (under an hour), twelve and a half in summer (ten minutes). One without
+    /// seasons.
+    public static func meltFactor(warmth: Float?) -> Double {
+        guard let warmth else { return 1 }
+        return 0.5 * pow(25, Double(min(max(warmth, 0), 1)))
+    }
+
+    /// Whether any chance, in any season, is snow.
+    var mayLaySnow: Bool {
+        if let seasons { return seasons.chances.values.contains { ($0[.snow] ?? 0) > 0 } }
+        return (chances[.snow] ?? 0) > 0
+    }
+
+    static func smooth(_ e0: Float, _ e1: Float, _ x: Float) -> Float {
+        let t = min(max((x - e0) / (e1 - e0), 0), 1)
+        return t * t * (3 - 2 * t)
+    }
+
+    // MARK: Seasons
+
+    /// A season of the year.
+    public enum Season: String, Sendable, Codable, CaseIterable {
+        case winter, spring, summer, autumn
+
+        /// How warm its middle is, 0 the coldest … 1 the warmest.
+        public var warmth: Float {
+            switch self {
+            case .winter: 0
+            case .spring, .autumn: 0.5
+            case .summer: 1
+            }
+        }
+    }
+
+    /// **Seasons on a schedule** (owner, 2026-11-16): each season its own chances, and the season from the real date by
+    /// hemisphere — or held in one, or run by a game's own calendar. **Each season's chances and warmth are its middle's**;
+    /// every day between mixes the two either side, so nothing jumps on a date.
+    public struct Seasons: Sendable, Equatable {
+        /// Where the season comes from.
+        public enum Calendar: Sendable, Equatable {
+            /// **The real date**: the schedule's clock read as seconds since 1970, UTC.
+            case date
+            /// Always this season.
+            case held(Season)
+            /// **A game's own year**: seasons this many seconds long, winter's middle at the clock's zero.
+            case cycle(seasonLength: Double)
+        }
+
+        public var chances: [Season: [Weather.Kind: Float]]
+        public var calendar: Calendar
+        /// The southern hemisphere: winter in July.
+        public var southern: Bool
+
+        public init(chances: [Season: [Weather.Kind: Float]] = Self.standardChances, calendar: Calendar = .date,
+                    southern: Bool = false) {
+            var kept: [Season: [Weather.Kind: Float]] = [:]
+            for season in Season.allCases {
+                kept[season] = (chances[season] ?? [:]).compactMapValues { $0.isFinite && $0 > 0 ? $0 : nil }
+            }
+            self.chances = kept
+            if case .cycle(let length) = calendar, !(length.isFinite && length > 0) {
+                self.calendar = .date
+            } else {
+                self.calendar = calendar
+            }
+            self.southern = southern
+        }
+
+        /// Snow and fog in winter, rain in spring, clear skies and storms in summer, rain and fog in autumn.
+        public static let standardChances: [Season: [Weather.Kind: Float]] = [
+            .winter: [.clear: 30, .overcast: 25, .snow: 30, .fog: 15],
+            .spring: [.clear: 40, .overcast: 25, .rain: 30, .fog: 5],
+            .summer: [.clear: 60, .overcast: 10, .rain: 15, .storm: 15],
+            .autumn: [.clear: 30, .overcast: 30, .rain: 25, .fog: 15],
+        ]
+
+        /// Where in the year `time` is, 0…4: 0 winter's middle, 1 spring's, 2 summer's, 3 autumn's, part way between.
+        public func position(at time: Double) -> Double {
+            let t = time.isFinite ? time : 0
+            switch calendar {
+            case .held(let season):
+                return Double(Season.allCases.firstIndex(of: season) ?? 0)
+            case .cycle(let length):
+                return Self.wrapped(t / (4 * length)) * 4
+            case .date:
+                // The middle of the northern winter is about the fifteenth of January; the year is 365.2422 days.
+                let year = t / 86_400 / 365.2422
+                return Self.wrapped(year - 14.0 / 365.2422 + (southern ? 0.5 : 0)) * 4
+            }
+        }
+
+        /// The season `time` is nearest the middle of.
+        public func season(at time: Double) -> Season {
+            Season.allCases[Int(position(at: time).rounded()) % 4]
+        }
+
+        /// The two seasons `time` is between, and how far from the first's middle to the second's, 0…1.
+        func between(at time: Double) -> (Season, Season, Float) {
+            let p = position(at: time)
+            let i = Int(p.rounded(.down)) % 4
+            return (Season.allCases[i], Season.allCases[(i + 1) % 4], Float(p - p.rounded(.down)))
+        }
+
+        static func wrapped(_ x: Double) -> Double { x - x.rounded(.down) }
+    }
+
+    /// **The chances at `time`**: the seasons' mixed by where in the year it is, or ``chances`` without seasons.
+    public func chances(at time: Double) -> [Weather.Kind: Float] {
+        guard let seasons else { return chances }
+        let (a, b, t) = seasons.between(at: time)
+        func share(_ season: Season) -> [Weather.Kind: Float] {
+            let raw = seasons.chances[season] ?? [:]
+            let total = raw.values.reduce(0, +)
+            return total > 0 ? raw.mapValues { $0 / total } : [.clear: 1]
+        }
+        let from = share(a), to = share(b)
+        var mixed: [Weather.Kind: Float] = [:]
+        for kind in Weather.Kind.allCases {
+            let v = (from[kind] ?? 0) * (1 - t) + (to[kind] ?? 0) * t
+            if v > 0 { mixed[kind] = v }
+        }
+        return mixed
+    }
+
+    /// **How warm it is at `time`**, 0 the middle of winter … 1 the middle of summer, mixed between; nil without seasons.
+    public func warmth(at time: Double) -> Float? {
+        guard let seasons else { return nil }
+        let (a, b, t) = seasons.between(at: time)
+        return a.warmth * (1 - t) + b.warmth * t
     }
 
     /// **Settings part way from one to another.** Rain turning to snow, or back, eases off before the other begins, so
@@ -208,7 +357,16 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
     // MARK: Coding
 
     private enum CodingKeys: String, CodingKey {
-        case isOn, chances, shortest, longest, change, lightest, heaviest, wander, seed
+        case isOn, chances, shortest, longest, change, lightest, heaviest, wander, seed, seasons
+    }
+
+    /// Seasons as a file has them: the calendar by name, a season's chances by name, so what this engine does not know is
+    /// left out.
+    private struct SeasonsFile: Codable {
+        var calendar: String
+        var seasonLength: Double?
+        var southern: Bool?
+        var chances: [String: [String: Float]]
     }
 
     /// The chances are written by name, so a kind this engine does not know is left out rather than failing the file.
@@ -228,7 +386,23 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
                   lightest: (try? c.decodeIfPresent(Float.self, forKey: .lightest)) ?? d.lightest,
                   heaviest: (try? c.decodeIfPresent(Float.self, forKey: .heaviest)) ?? d.heaviest,
                   wander: (try? c.decodeIfPresent(Float.self, forKey: .wander)) ?? d.wander,
-                  seed: (try? c.decodeIfPresent(UInt32.self, forKey: .seed)) ?? d.seed)
+                  seed: (try? c.decodeIfPresent(UInt32.self, forKey: .seed)) ?? d.seed,
+                  seasons: (try? c.decodeIfPresent(SeasonsFile.self, forKey: .seasons)).flatMap { $0.map(Self.seasons(from:)) })
+    }
+
+    private static func seasons(from file: SeasonsFile) -> Seasons {
+        var chances: [Season: [Weather.Kind: Float]] = [:]
+        for (name, shares) in file.chances {
+            guard let season = Season(rawValue: name) else { continue }
+            var kept: [Weather.Kind: Float] = [:]
+            for (kind, share) in shares { if let k = Weather.Kind(rawValue: kind) { kept[k] = share } }
+            chances[season] = kept
+        }
+        let calendar: Seasons.Calendar = switch file.calendar {
+        case "cycle": .cycle(seasonLength: file.seasonLength ?? 0)
+        default: Season(rawValue: file.calendar).map { .held($0) } ?? .date
+        }
+        return Seasons(chances: chances, calendar: calendar, southern: file.southern ?? false)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -242,6 +416,19 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
         try c.encode(heaviest, forKey: .heaviest)
         try c.encode(wander, forKey: .wander)
         try c.encode(seed, forKey: .seed)
+        if let seasons {
+            let (calendar, length): (String, Double?) = switch seasons.calendar {
+            case .date: ("date", nil)
+            case .held(let season): (season.rawValue, nil)
+            case .cycle(let seconds): ("cycle", seconds)
+            }
+            var chances: [String: [String: Float]] = [:]
+            for (season, shares) in seasons.chances {
+                chances[season.rawValue] = Dictionary(uniqueKeysWithValues: shares.map { ($0.key.rawValue, $0.value) })
+            }
+            try c.encode(SeasonsFile(calendar: calendar, seasonLength: length, southern: seasons.southern, chances: chances),
+                         forKey: .seasons)
+        }
     }
 }
 
