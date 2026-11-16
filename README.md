@@ -39,6 +39,13 @@ swift run DuctaneSample
 
 **WASD** to move, click to capture the mouse, **esc** to release it.
 
+To start a game of your own, `ductane-new` writes an Xcode project that opens a world exported by a world editor, draws
+it with `WorldRenderer` and walks it in first person:
+
+```bash
+swift run --package-path Ductane ductane-new "My Game" --organization com.example
+```
+
 ## What's included
 
 - **Frame pacing** — frames in flight, a fixed simulation step, interpolation between steps

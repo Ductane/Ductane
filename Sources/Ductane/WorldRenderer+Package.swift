@@ -10,7 +10,7 @@ public extension WorldRenderer {
 
     /// **Shows a scene package** (``WorldPackage``) — what a world editor exported — as its author saw it: its scene
     /// (``WorldScene/init(_:)``), its ground (``WorldPackage/groundSource()``), what its props' materials draw as liquids
-    /// and grime, the shapes its walkers meet. Its props load in the background, appearing as they arrive; `loaded` hears
+    /// and grime, the shapes its walkers meet and what they pass through. Its props load in the background, appearing as they arrive; `loaded` hears
     /// the ones that failed once they are all in, and the far shadows are fitted to the world (``fitExtent()``).
     ///
     /// ```swift
@@ -36,6 +36,7 @@ public extension WorldRenderer {
         self.liquids = { liquids[$0] ?? [:] }
         self.grime = { grime[$0] ?? [:] }
         self.collisionShape = { shapes[$0] }
+        walkedThrough = Set(world.walkedThrough.filter(urls.indices.contains).map { urls[$0] })
         scene = WorldScene(package)
         showGround(try package.groundSource())
         loadPropsInBackground { [weak self] failures, _ in

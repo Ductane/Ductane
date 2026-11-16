@@ -1361,6 +1361,10 @@ public final class WorldRenderer: GameLoop {
     /// the prop as drawn. A game's from its world file (``WorldPackage/collisionShapes()``).
     public var collisionShape: (URL) -> [SIMD3<Float>]? = { _ in nil }
 
+    /// **The props a walker passes through**, by file — grass, reeds, litter — left out of ``solids(around:reach:)``. A
+    /// game's from its world file (``WorldFile/walkedThrough``), set by ``show(_:loaded:)``.
+    public var walkedThrough: Set<URL> = []
+
     // MARK: Ground
 
     /// Shows a ground, or none. Cheap to call every tick of a brush stroke: given what the tick `changed`, only that

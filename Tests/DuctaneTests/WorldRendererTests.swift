@@ -155,4 +155,23 @@ struct WorldRendererTests {
         #expect(png.count > 100)
         #expect(world.drawn.view > 0, "the ground and the prop were drawn")
     }
+
+    @Test("A walker meets the props near it, placed and scattered, and none it passes through")
+    func solidsNearAWalker() async throws {
+        guard let device = MTLCreateSystemDefaultDevice(), device.supportsFamily(.metal4) else { return }
+        let (package, folder) = try Self.package()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let world = try WorldRenderer(engine: FrameRenderer(device: device), textureCache: nil)
+        #expect(world.solids(around: .zero, reach: 10).isEmpty, "nothing is solid before it is shown")
+        var failures: [(URL, Error)]?
+        try world.show(package) { failures = $0 }
+        for _ in 0..<500 where failures == nil { try await Task.sleep(for: .milliseconds(20)) }
+        #expect(world.walkedThrough.isEmpty)
+        let near = world.solids(around: .zero, reach: 10)
+        #expect(near.count == 3, "the placement and both scattered copies")
+        #expect(near.allSatisfy { !$0.triangles.isEmpty })
+        #expect(world.solids(around: SIMD2(100, 100), reach: 10).isEmpty, "nothing within reach of a far point")
+        world.walkedThrough = [package.propURL(0)]
+        #expect(world.solids(around: .zero, reach: 10).isEmpty, "a prop walked through is never solid")
+    }
 }

@@ -17,6 +17,10 @@ let package = Package(
         // **The sample is a product, not a test fixture.** `swift run DuctaneSample` is the first
         // thing somebody who cloned this repo should be able to do.
         .executable(name: "DuctaneSample", targets: ["DuctaneSample"]),
+        // **A new game, ready to run**: `swift run ductane-new "My Game"`, or the same files written by a world editor
+        // through `DuctaneTemplate`.
+        .library(name: "DuctaneTemplate", targets: ["DuctaneTemplate"]),
+        .executable(name: "ductane-new", targets: ["ductane-new"]),
     ],
     targets: [
         // meshoptimizer's simplifier, for level of detail (`MeshDetail`): C++, vendored unmodified from the 1.3
@@ -125,6 +129,21 @@ let package = Package(
             // `.copy` and not `.process`: the shader **source** has to survive into the bundle so it
             // can be compiled at runtime when no metallib exists.
             resources: [.copy("SampleShaders.metal"), .process("Resources")],
+            swiftSettings: [.defaultIsolation(MainActor.self)]
+        ),
+        // **A new game's project**, as text: no GPU, no window, nothing but Foundation — so a sandboxed app can write
+        // one into a folder it was given, and `swift test` checks every file.
+        .target(
+            name: "DuctaneTemplate",
+            swiftSettings: [.defaultIsolation(MainActor.self)]
+        ),
+        .testTarget(
+            name: "DuctaneTemplateTests",
+            dependencies: ["DuctaneTemplate"]
+        ),
+        .executableTarget(
+            name: "ductane-new",
+            dependencies: ["Ductane", "DuctaneTemplate"],
             swiftSettings: [.defaultIsolation(MainActor.self)]
         ),
         .testTarget(
