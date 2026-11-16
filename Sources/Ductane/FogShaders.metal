@@ -18,7 +18,7 @@ using namespace metal;
 struct DUFogUniforms {
     float4x4 inverseViewProjection;
     float4   eye;            // xyz; w where the world's fog starts, metres from the eye
-    float4   grid;           // x columns, y rows, z slices
+    float4   grid;           // x columns, y rows, z slices, w the distance the sky is read at
     float4   depth;          // x the first slice's near edge, y log(far / near), z the world's fog density, w the share of its light from the sun
     float4   sun;            // xyz toward the light; w 1 when shadows are given
     float4   sunColour;      // rgb; w how much it scatters forward
@@ -120,7 +120,8 @@ kernel void duFogVolume(uint2 id [[thread_position_in_grid]],
                         texture3d<half, access::write> volume [[texture(0)]],
                         depth2d_array<float> shadows [[texture(1)]],
                         texture2d<float> floorMap [[texture(2)]],
-                        texture2d<float> cloudMap [[texture(3)]]) {
+                        texture2d<float> cloudMap [[texture(3)]],
+                        texture2d<half, access::write> skyPicture [[texture(4)]]) {
     int columns = int(u.grid.x), rows = int(u.grid.y), slices = int(u.grid.z);
     if (int(id.x) >= columns || int(id.y) >= rows) return;
     float2 ndc = (float2(id) + 0.5) / float2(columns, rows) * float2(2, -2) + float2(-1, 1);
@@ -134,6 +135,12 @@ kernel void duFogVolume(uint2 id [[thread_position_in_grid]],
     float jitter = 0.35 + 0.3 * duFogHash(float2(id) * 1.37 + 0.5);
     int lights = min(int(u.lightCount.x), 16);
     float3 scattered = 0;
+    // **What the sky gets**: the same light without the shafts' darkening. That darkening takes away the world fog's
+    // light where the sun cannot reach — light a surface was given by the world's fog, but the sky never is. Taken from
+    // the sky it went below nothing, and the clouds' shadows printed dark, off-colour patches across it.
+    float3 skyward = 0;
+    float skyDistance = u.grid.w;
+    bool skyWritten = false;
     float through = 1;       // what still shows through the ground fog
     float before = 0;
     for (int i = 0; i < slices; ++i) {
@@ -155,6 +162,7 @@ kernel void duFogVolume(uint2 id [[thread_position_in_grid]],
             float slice = exp(-depth);
             float3 groundLight = u.groundColour.rgb * (u.ambient.rgb * 0.7 + u.sunColour.rgb * sun * phase * 0.15);
             scattered += groundLight * (1 - slice) * seen;
+            skyward += groundLight * (1 - slice) * seen;
             // The world's fog already greys toward the horizon colour; where the sun cannot reach it, it is darker —
             // the shafts.
             scattered += u.horizon.rgb * max(sunShare * phase * (sun - 1), -1.0) * worldThickness * span * seen;
@@ -164,11 +172,17 @@ kernel void duFogVolume(uint2 id [[thread_position_in_grid]],
                 float3 to = u.lightPosition[k].xyz - p;
                 float t = saturate(length(to) / max(u.lightPosition[k].w, 0.01));
                 float fall = (1 - t) * (1 - t);
-                scattered += u.lightColour[k].rgb * fall * fall * glowIn * span * 0.3 * seen;
+                float3 glow = u.lightColour[k].rgb * fall * fall * glowIn * span * 0.3 * seen;
+                scattered += glow;
+                skyward += glow;
             }
             through *= slice;
         }
         volume.write(half4(half3(scattered), half(through)), uint3(id.x, id.y, uint(i)));
+        if (!skyWritten && (after >= skyDistance || i == slices - 1)) {
+            skyPicture.write(half4(half3(skyward), half(through)), id);
+            skyWritten = true;
+        }
         before = after;
     }
 }

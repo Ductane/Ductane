@@ -14,8 +14,9 @@ import simd
 ///
 /// **Before the scene pass**, after the shadows: ``encode(into:frameSlot:frame:quality:width:height:)`` records a compute
 /// pass and returns the volume. A renderer binds it to every shader that draws a surface and lays it over what they draw
-/// with ``Lookup``: what the cells in front send toward the eye added, what shows through the ground fog kept — the
-/// world's own exponential-squared fog stays the surfaces' as before, and the volume adds the shafts and the ground fog.
+/// with ``Lookup``, and lays ``Drawn/sky`` over the sky: what the cells in front send toward the eye added, what shows
+/// through the ground fog kept — the world's own exponential-squared fog stays the surfaces' as before, and the volume
+/// adds the shafts and the ground fog.
 /// At ``GraphicsSettings/FogQuality/low`` there is no volume, and the world's distance fog is what there is.
 public final class VolumetricFog {
     /// A light that glows in the fog: where, how far it reaches, its colour times its intensity.
@@ -153,10 +154,15 @@ public final class VolumetricFog {
     private let blankDepth: MTLTexture
     private let blank: MTLTexture
     private var volumes: [MTLTexture?] = Array(repeating: nil, count: FrameRenderer.maxFramesInFlight)
+    /// **The sky's own picture**, a cell a column: the light in front of the sky at ``skyDistance(fogDensity:fogStart:)``,
+    /// without the shafts' darkening of the world's fog — which the sky, never fogged by it, has nothing to lose.
+    private var skyPictures: [MTLTexture?] = Array(repeating: nil, count: FrameRenderer.maxFramesInFlight)
 
     /// Everything the GPU must be able to reach: add it to the renderer's residency set — again after a volume is made
     /// anew (``volumesChanged``).
-    public var allocations: [any MTLAllocation] { [uniforms, blankDepth, blank] + volumes.compactMap { $0 } }
+    public var allocations: [any MTLAllocation] {
+        [uniforms, blankDepth, blank] + volumes.compactMap { $0 } + skyPictures.compactMap { $0 }
+    }
     public var volumesChanged = false
 
     public init(device: MTLDevice) throws {
@@ -172,7 +178,7 @@ public final class VolumetricFog {
         pipeline = try compiler.makeComputePipelineState(descriptor: descriptor)
         let tableDescriptor = MTL4ArgumentTableDescriptor()
         tableDescriptor.maxBufferBindCount = 1
-        tableDescriptor.maxTextureBindCount = 4
+        tableDescriptor.maxTextureBindCount = 5
         table = try device.makeArgumentTable(descriptor: tableDescriptor)
         guard let buffer = device.makeBuffer(length: Self.stride * FrameRenderer.maxFramesInFlight,
                                              options: .storageModeShared) else {
@@ -220,10 +226,20 @@ public final class VolumetricFog {
         return min(far, fogStart + 1.05 / fogDensity)
     }
 
-    /// **Records the fog** for a frame drawn `width` × `height`, and returns the volume with what a shader needs to read
-    /// it — nil at Low, or when there is nothing to draw.
+    /// What a frame's fog pass made: the volume surfaces read, the sky's own picture, and how to read them.
+    public struct Drawn {
+        /// Surfaces read it (`duFogApply`).
+        public var volume: MTLTexture
+        /// A cell a column, read over the sky where nothing solid was drawn: what the air sends added, the sky kept by its
+        /// alpha — at the screen's place, with no depth to look up.
+        public var sky: MTLTexture
+        public var lookup: Lookup
+    }
+
+    /// **Records the fog** for a frame drawn `width` × `height`, and returns the volume, the sky's picture and what a
+    /// shader needs to read them — nil at Low, or when there is nothing to draw.
     public func encode(into commandBuffer: MTL4CommandBuffer, frameSlot: Int, frame: Frame,
-                       quality: GraphicsSettings.FogQuality, width: Int, height: Int) -> (volume: MTLTexture, lookup: Lookup)? {
+                       quality: GraphicsSettings.FogQuality, width: Int, height: Int) -> Drawn? {
         guard let grid = Self.grid(quality), !frame.isEmpty else { return nil }
         let columns = max((width + grid.pixels - 1) / grid.pixels, 1)
         let rows = max((height + grid.pixels - 1) / grid.pixels, 1)
@@ -241,7 +257,17 @@ public final class VolumetricFog {
             volumes[slot]?.label = "Volumetric Fog"
             volumesChanged = true
         }
-        guard let volume = volumes[slot] else { return nil }
+        if let p = skyPictures[slot], p.width == columns, p.height == rows {} else {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: columns,
+                                                                      height: rows, mipmapped: false)
+            descriptor.usage = [.shaderRead, .shaderWrite]
+            descriptor.storageMode = .private
+            skyPictures[slot] = device.makeTexture(descriptor: descriptor)
+            skyPictures[slot]?.label = "Volumetric Fog over the Sky"
+            volumesChanged = true
+        }
+        guard let volume = volumes[slot], let skyPicture = skyPictures[slot] else { return nil }
+        let skyDistance = Self.skyDistance(fogDensity: frame.fogDensity, fogStart: frame.fogStart)
 
         let logRatio = log(Self.far / Self.near)
         let light = frame.lighting
@@ -250,7 +276,7 @@ public final class VolumetricFog {
         var values = Uniforms(
             inverseViewProjection: frame.viewProjection.inverse,
             eye: SIMD4(frame.eye, frame.fogStart),
-            grid: SIMD4(Float(columns), Float(rows), Float(grid.slices), 0),
+            grid: SIMD4(Float(columns), Float(rows), Float(grid.slices), skyDistance),
             depth: SIMD4(Self.near, logRatio, max(frame.fogDensity, 0), Self.sunShare),
             sun: SIMD4(light.direction, frame.shadows == nil ? 0 : 1),
             sunColour: SIMD4(light.colour, Self.forwardScattering),
@@ -293,10 +319,11 @@ public final class VolumetricFog {
         table.setTexture((frame.shadows?.texture ?? blankDepth).gpuResourceID, index: 1)
         table.setTexture(((frame.floor != nil ? frame.floorTexture : nil) ?? blank).gpuResourceID, index: 2)
         table.setTexture((frame.cloudMap ?? blank).gpuResourceID, index: 3)
+        table.setTexture(skyPicture.gpuResourceID, index: 4)
         encoder.dispatchThreads(threadsPerGrid: MTLSize(width: columns, height: rows, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
         encoder.endEncoding()
-        let skyDistance = Self.skyDistance(fogDensity: frame.fogDensity, fogStart: frame.fogStart)
-        return (volume, Lookup(parameters: SIMD4(1, Self.near, logRatio, Float(grid.slices)), skyDistance: skyDistance))
+        return Drawn(volume: volume, sky: skyPicture,
+                     lookup: Lookup(parameters: SIMD4(1, Self.near, logRatio, Float(grid.slices)), skyDistance: skyDistance))
     }
 }
