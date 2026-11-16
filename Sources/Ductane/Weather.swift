@@ -19,7 +19,7 @@ import simd
 /// a random generator's state, so two players on one clock see one storm. Where they strike is fixed in the world,
 /// around its middle, so thunder arrives later the further away the listener stands.
 ///
-/// What it does not do: change over time. The weather is as set until a game sets another.
+/// **Changing over time is a ``schedule``'s**: ``current(at:)`` is the weather at a moment, the schedule's when it is on.
 public nonisolated struct Weather: Sendable, Equatable, Codable {
 
     /// What the sky is doing.
@@ -73,14 +73,17 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
     public var byHand: Settings?
     /// Where lightning's strikes start: one world, one storm.
     public var seed: UInt32
+    /// **Weather that changes by itself**, when on: ``current(at:)`` follows it. Nil is weather as set.
+    public var schedule: WeatherSchedule?
 
     public init(kind: Kind = .clear, severity: Float = 0.5, windHeading: Float = 60, byHand: Settings? = nil,
-                seed: UInt32 = 1) {
+                seed: UInt32 = 1, schedule: WeatherSchedule? = nil) {
         self.kind = kind
         self.severity = min(max(severity.isFinite ? severity : 0.5, 0), 1)
         self.windHeading = windHeading.isFinite ? windHeading : 60
         self.byHand = byHand
         self.seed = seed
+        self.schedule = schedule
     }
 
     /// What a file leaves out is the default, and a kind this engine does not know is clear.
@@ -91,7 +94,8 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
                   severity: (try? c.decodeIfPresent(Float.self, forKey: .severity)) ?? d.severity,
                   windHeading: (try? c.decodeIfPresent(Float.self, forKey: .windHeading)) ?? d.windHeading,
                   byHand: try? c.decodeIfPresent(Settings.self, forKey: .byHand),
-                  seed: (try? c.decodeIfPresent(UInt32.self, forKey: .seed)) ?? d.seed)
+                  seed: (try? c.decodeIfPresent(UInt32.self, forKey: .seed)) ?? d.seed,
+                  schedule: try? c.decodeIfPresent(WeatherSchedule.self, forKey: .schedule))
     }
 
     /// A clear sky, no wind to speak of: what a world without weather has.

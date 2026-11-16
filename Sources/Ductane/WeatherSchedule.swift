@@ -1,0 +1,212 @@
+//
+//  WeatherSchedule.swift
+//  Ductane
+//
+
+import Foundation
+import simd
+
+/// **Weather that changes by itself**: spells of one kind after another — clear for a while, cloud, a shower, clear
+/// again — each as heavy as a pick within a range, the wind turning a little each time, one spell blending into the
+/// next.
+///
+/// **Made of a chance per kind, how long a spell lasts and how long a change takes.** Nothing is stored as time passes:
+/// the weather at any moment is worked out from ``seed`` and the time alone, so everyone with the same clock sees the
+/// same sky, and a moment years into real time costs what the first one did. ``Weather/current(at:)`` is what a game
+/// asks each frame, by its own clock or by ``Weather/realTime()``.
+///
+/// **How the spells are laid out**: boundaries sit every ``(shortest + longest) / 2`` seconds, each moved by its own
+/// random amount up to a quarter of the difference either way — so every spell lasts between ``shortest`` and
+/// ``longest``, and the spell at any time is one of two, found without counting from the start.
+public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
+
+    /// Whether a game runs it. Off, the weather is as set; the schedule is kept for when it is turned on again.
+    public var isOn: Bool
+    /// **How likely each kind is**, as shares: they need not add up to anything. A kind left out never comes.
+    public var chances: [Weather.Kind: Float]
+    /// How long a spell lasts, seconds: the shortest and the longest.
+    public var shortest: Double
+    public var longest: Double
+    /// How long one spell takes to become the next, seconds — at the start of the new one.
+    public var change: Double
+    /// How heavy a spell is: a pick between these, 0…1.
+    public var lightest: Float
+    public var heaviest: Float
+    /// **How far the wind turns from the weather's heading**, degrees either way: the heading is the prevailing wind.
+    public var wander: Float
+    /// Where the spells start: one seed, one sequence of weather.
+    public var seed: UInt32
+
+    public init(isOn: Bool = true, chances: [Weather.Kind: Float] = Self.standardChances,
+                shortest: Double = 10 * 60, longest: Double = 30 * 60, change: Double = 2 * 60,
+                lightest: Float = 0.2, heaviest: Float = 0.8, wander: Float = 45, seed: UInt32 = 1) {
+        self.isOn = isOn
+        self.chances = chances.compactMapValues { $0.isFinite && $0 > 0 ? $0 : nil }
+        let short = shortest.isFinite ? min(max(shortest, Self.spellLengths.lowerBound), Self.spellLengths.upperBound) : 600
+        self.shortest = short
+        self.longest = longest.isFinite ? min(max(longest, short), Self.spellLengths.upperBound) : max(short, 1800)
+        self.change = change.isFinite ? min(max(change, 0), short) : min(120, short)
+        let low = min(max(lightest.isFinite ? lightest : 0.2, 0), 1)
+        self.lightest = low
+        self.heaviest = min(max(heaviest.isFinite ? heaviest : 0.8, low), 1)
+        self.wander = min(max(wander.isFinite ? wander : 45, 0), 180)
+        self.seed = seed
+    }
+
+    /// Clear half the time, then overcast, rain and the odd storm.
+    public static let standardChances: [Weather.Kind: Float] = [.clear: 50, .overcast: 25, .rain: 15, .storm: 10]
+    /// How short and how long a spell may be set, seconds: a minute to a day.
+    public static let spellLengths: ClosedRange<Double> = 60...86_400
+
+    // MARK: Spells
+
+    /// **One stretch of one kind of weather.**
+    public struct Spell: Sendable, Equatable {
+        /// Which spell it is: the same number is always the same spell.
+        public var index: Int64
+        public var kind: Weather.Kind
+        public var severity: Float
+        /// Degrees from the weather's heading.
+        public var windTurn: Float
+        /// When it begins and ends, seconds on the schedule's clock.
+        public var start: Double
+        public var end: Double
+    }
+
+    /// The middle of the spells' lengths: where the boundaries sit before each is moved.
+    var pitch: Double { (shortest + longest) / 2 }
+
+    /// When spell `index` begins.
+    func boundary(_ index: Int64) -> Double {
+        let spread = (longest - shortest) / 4
+        return Double(index) * pitch + (Weather.unit(seed, index, 10) * 2 - 1) * spread
+    }
+
+    /// Spell `index`, as it always is.
+    public func spell(_ index: Int64) -> Spell {
+        Spell(index: index, kind: kind(index),
+              severity: lightest + Float(Weather.unit(seed, index, 12)) * (heaviest - lightest),
+              windTurn: (Float(Weather.unit(seed, index, 13)) * 2 - 1) * wander,
+              start: boundary(index), end: boundary(index + 1))
+    }
+
+    /// **The spell under way at `time`.**
+    public func spell(at time: Double) -> Spell {
+        let t = time.isFinite ? time : 0
+        let guess = Int64(max(min((t / pitch).rounded(.down), 9e15), -9e15))
+        // Boundaries move less than half a pitch, so the spell is the guess or the one before it.
+        let index = t < boundary(guess) ? guess - 1 : (t >= boundary(guess + 1) ? guess + 1 : guess)
+        return spell(index)
+    }
+
+    /// Every spell that touches `start`…`end`, in order — what a strip of the coming hours is drawn from.
+    public func spells(from start: Double, to end: Double) -> [Spell] {
+        guard end > start else { return [spell(at: start)] }
+        var spells = [spell(at: start)]
+        while let last = spells.last, last.end < end, spells.count < 10_000 {
+            spells.append(spell(last.index + 1))
+        }
+        return spells
+    }
+
+    /// The kind spell `index` is, by the chances; clear when none is given.
+    func kind(_ index: Int64) -> Weather.Kind {
+        let shares = Weather.Kind.allCases.map { (kind: $0, share: chances[$0] ?? 0) }
+        let total = shares.reduce(0) { $0 + $1.share }
+        guard total > 0 else { return .clear }
+        var pick = Float(Weather.unit(seed, index, 11)) * total
+        for (kind, share) in shares where share > 0 {
+            if pick < share { return kind }
+            pick -= share
+        }
+        return shares.last { $0.share > 0 }?.kind ?? .clear
+    }
+
+    // MARK: The weather
+
+    /// **The weather at `time`** under `base` — its heading the prevailing wind, its seed lightning's: the spell's kind at
+    /// its severity, the wind turned, and in a spell's first ``change`` seconds a blend from the spell before.
+    public func weather(at time: Double, under base: Weather) -> Weather {
+        let now = spell(at: time)
+        var weather = Weather(kind: now.kind, severity: now.severity, windHeading: base.windHeading + now.windTurn,
+                              seed: base.seed)
+        guard change > 0, time - now.start < change else { return weather }
+        let before = spell(now.index - 1)
+        let x = Float(min(max((time - now.start) / change, 0), 1))
+        let t = x * x * (3 - 2 * x)
+        let from = Weather.preset(before.kind, severity: before.severity)
+        let to = Weather.preset(now.kind, severity: now.severity)
+        weather.byHand = Self.blend(from, to, t)
+        weather.windHeading = base.windHeading + before.windTurn + (now.windTurn - before.windTurn) * t
+        return weather
+    }
+
+    /// **Settings part way from one to another.** Rain turning to snow, or back, eases off before the other begins, so
+    /// it never falls as half of each.
+    static func blend(_ a: Weather.Settings, _ b: Weather.Settings, _ t: Float) -> Weather.Settings {
+        func mix(_ x: Float, _ y: Float) -> Float { x + (y - x) * t }
+        var falling = mix(a.precipitation, b.precipitation), snow = t < 0.5 ? a.snow : b.snow
+        if a.snow != b.snow, a.precipitation > 0 || b.precipitation > 0 {
+            falling = t < 0.5 ? a.precipitation * (1 - 2 * t) : b.precipitation * (2 * t - 1)
+        } else if a.precipitation == 0 {
+            snow = b.snow
+        } else if b.precipitation == 0 {
+            snow = a.snow
+        }
+        return Weather.Settings(cloudCover: mix(a.cloudCover, b.cloudCover), precipitation: falling, snow: snow,
+                                windSpeed: mix(a.windSpeed, b.windSpeed), fogDensity: mix(a.fogDensity, b.fogDensity),
+                                lightning: mix(a.lightning, b.lightning))
+    }
+
+    // MARK: Coding
+
+    private enum CodingKeys: String, CodingKey {
+        case isOn, chances, shortest, longest, change, lightest, heaviest, wander, seed
+    }
+
+    /// The chances are written by name, so a kind this engine does not know is left out rather than failing the file.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = WeatherSchedule()
+        let named = (try? c.decodeIfPresent([String: Float].self, forKey: .chances)) ?? nil
+        var chances: [Weather.Kind: Float] = [:]
+        for (name, share) in named ?? [:] {
+            if let kind = Weather.Kind(rawValue: name) { chances[kind] = share }
+        }
+        self.init(isOn: (try? c.decodeIfPresent(Bool.self, forKey: .isOn)) ?? d.isOn,
+                  chances: named == nil ? d.chances : chances,
+                  shortest: (try? c.decodeIfPresent(Double.self, forKey: .shortest)) ?? d.shortest,
+                  longest: (try? c.decodeIfPresent(Double.self, forKey: .longest)) ?? d.longest,
+                  change: (try? c.decodeIfPresent(Double.self, forKey: .change)) ?? d.change,
+                  lightest: (try? c.decodeIfPresent(Float.self, forKey: .lightest)) ?? d.lightest,
+                  heaviest: (try? c.decodeIfPresent(Float.self, forKey: .heaviest)) ?? d.heaviest,
+                  wander: (try? c.decodeIfPresent(Float.self, forKey: .wander)) ?? d.wander,
+                  seed: (try? c.decodeIfPresent(UInt32.self, forKey: .seed)) ?? d.seed)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(isOn, forKey: .isOn)
+        try c.encode(Dictionary(uniqueKeysWithValues: chances.map { ($0.key.rawValue, $0.value) }), forKey: .chances)
+        try c.encode(shortest, forKey: .shortest)
+        try c.encode(longest, forKey: .longest)
+        try c.encode(change, forKey: .change)
+        try c.encode(lightest, forKey: .lightest)
+        try c.encode(heaviest, forKey: .heaviest)
+        try c.encode(wander, forKey: .wander)
+        try c.encode(seed, forKey: .seed)
+    }
+}
+
+public nonisolated extension Weather {
+    /// **The weather at `time`**: the schedule's when it has one and it is on, else this weather as set. What a game draws
+    /// and hears each frame; `time` is the game's clock — ``realTime()`` unless it has its own, such as a server's.
+    func current(at time: Double) -> Weather {
+        guard let schedule, schedule.isOn else { return self }
+        return schedule.weather(at: time, under: self)
+    }
+
+    /// **The real-world time**, seconds since 1970 (UTC): the clock a schedule runs by when a game gives none, so everyone
+    /// sees one sky without a server.
+    static func realTime() -> Double { Date().timeIntervalSince1970 }
+}
