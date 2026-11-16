@@ -202,6 +202,7 @@ struct WeatherScheduleTests {
         #expect(WeatherSchedule.Seasons(calendar: .held(.winter)).season(at: Self.date(2027, 7, 15)) == .winter)
         let week = WeatherSchedule.Seasons(calendar: .cycle(seasonLength: 7 * 86_400))
         #expect(week.season(at: 0) == .winter && week.season(at: 7 * 86_400) == .spring && week.season(at: 28 * 86_400) == .winter)
+        #expect(WeatherSchedule.Seasons(calendar: .cycle(seasonLength: 7 * 86_400), southern: true).season(at: 0) == .summer)
         #expect(WeatherSchedule.Seasons(calendar: .cycle(seasonLength: -1)).calendar == .date)
         // A file can say anything: a season too short to divide by, or a clock at its limits, never crashes.
         let tiny = WeatherSchedule.Seasons(calendar: .cycle(seasonLength: 1e-300))

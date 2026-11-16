@@ -536,10 +536,14 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         public var timeOfDay: Float
         public var fogDensity: Float
         public var sun: Sun?
-        public init(timeOfDay: Float = 15, fogDensity: Float = 0, sun: Sun? = nil) {
+        /// **The world's clock** (2026-11-16): the day running, the season on its calendar, the sun by latitude — a game sets
+        /// its sky from it each frame (``WorldClock/sky(_:at:)``). Nil is the hour as set on the engine's equinox day.
+        public var clock: WorldClock?
+        public init(timeOfDay: Float = 15, fogDensity: Float = 0, sun: Sun? = nil, clock: WorldClock? = nil) {
             self.timeOfDay = timeOfDay
             self.fogDensity = fogDensity
             self.sun = sun
+            self.clock = clock
         }
 
         public struct Sun: Codable, Equatable, Sendable {

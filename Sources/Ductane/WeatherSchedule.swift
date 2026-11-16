@@ -252,7 +252,7 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
             case date
             /// Always this season.
             case held(Season)
-            /// **A game's own year**: seasons this many seconds long, winter's middle at the clock's zero.
+            /// **A game's own year**: seasons this many seconds long, the northern winter's middle at the clock's zero.
             case cycle(seasonLength: Double)
         }
 
@@ -301,7 +301,8 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
             case .held(let season):
                 return Double(Season.allCases.firstIndex(of: season) ?? 0)
             case .cycle(let length):
-                return Self.wrapped(t / (4 * length)) * 4
+                // Counted, as the real date is, from the northern winter's middle: south of the equator it is summer then.
+                return Self.wrapped(t / (4 * length) + (southern ? 0.5 : 0)) * 4
             case .date:
                 // The middle of the northern winter is about the fifteenth of January; the year is 365.2422 days.
                 let year = t / 86_400 / 365.2422

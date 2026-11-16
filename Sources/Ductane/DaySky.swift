@@ -30,14 +30,23 @@ public nonisolated struct DaySky: Sendable, Equatable {
     /// **How bright the sky overhead is drawn**, against the horizon: 1 the engine's own, 0.5 half — the darker zenith
     /// of thin air. The same as ``saturation``: the sky drawn, not the light it casts.
     public var zenithBrightness: Float = 1
+    /// **The latitude the sun moves at**, degrees, north positive (2026-11-16): with it the sun's path follows the date —
+    /// short, low winter days, long, high summer ones (``sunDirection(at:latitude:yearPosition:)``). Nil is the engine's
+    /// equinox day, the same everywhere.
+    public var latitude: Float?
+    /// **Where in the year it is**, 0…4 on the northern calendar: 0 the middle of the northern winter, 1 of spring, 2 of
+    /// summer, 3 of autumn. Only read with a ``latitude``; ``WorldClock`` sets it.
+    public var yearPosition: Double = 1
 
     public init(timeOfDay: Float = 15, sun: Sun? = nil, fogDensity: Float = 0,
-                saturation: Float = 1, zenithBrightness: Float = 1) {
+                saturation: Float = 1, zenithBrightness: Float = 1, latitude: Float? = nil, yearPosition: Double = 1) {
         self.timeOfDay = timeOfDay
         self.sun = sun
         self.fogDensity = fogDensity
         self.saturation = saturation
         self.zenithBrightness = zenithBrightness
+        self.latitude = latitude.map { min(max($0.isFinite ? $0 : 45, -89), 89) }
+        self.yearPosition = yearPosition.isFinite ? yearPosition : 1
     }
 
     /// How much fog lies between the eye and a point this far away, 0…1 (``fogDensity``).
@@ -114,6 +123,35 @@ public nonisolated struct DaySky: Sendable, Equatable {
         return (simd_normalize(direction), elevation)
     }
 
+    /// The tilt of the Earth's axis, degrees: how far north and south of the equator the sun stands at the solstices.
+    public static let axialTilt: Float = 23.44
+
+    /// **The sun as it really moves**, at `latitude` degrees and `yearPosition` (0 midwinter north … 2 midsummer): its
+    /// declination from the year, the hour angle from the time of day — solar noon at twelve — and its height and bearing
+    /// from the two. East +x, south +z, up +y, as ``sunDirection(at:)``.
+    public static func sunDirection(at hours: Float, latitude: Float, yearPosition: Double)
+        -> (direction: SIMD3<Float>, elevation: Float) {
+        let phi = latitude * .pi / 180
+        let declination = -axialTilt * .pi / 180 * Float(cos(yearPosition / 4 * 2 * .pi))
+        let hourAngle = (hours - 12) / 24 * 2 * .pi
+        let up = sin(phi) * sin(declination) + cos(phi) * cos(declination) * cos(hourAngle)
+        let east = -cos(declination) * sin(hourAngle)
+        let north = cos(phi) * sin(declination) - sin(phi) * cos(declination) * cos(hourAngle)
+        let direction = simd_normalize(SIMD3(east, up, -north))
+        return (direction, asin(min(max(direction.y, -1), 1)))
+    }
+
+    /// **When the sun rises and sets**, hours, at a latitude and a place in the year; nil when it does neither that day
+    /// (polar day or night).
+    public static func daylight(latitude: Float, yearPosition: Double) -> (rise: Float, set: Float)? {
+        let phi = latitude * .pi / 180
+        let declination = -axialTilt * .pi / 180 * Float(cos(yearPosition / 4 * 2 * .pi))
+        let c = -tan(phi) * tan(declination)
+        guard c > -1, c < 1 else { return nil }
+        let half = acos(c) / (2 * .pi) * 24
+        return (12 - half, 12 + half)
+    }
+
     public var lighting: Lighting {
         var lighting = unstyledLighting
         lighting.skyLight = lighting.zenith
@@ -135,7 +173,8 @@ public nonisolated struct DaySky: Sendable, Equatable {
                             elevation: sun.height * .pi / 180)
         }
         let hours = Self.wrap(timeOfDay)
-        let (direction, elevation) = Self.sunDirection(at: hours)
+        let (direction, elevation) = latitude.map { Self.sunDirection(at: hours, latitude: $0, yearPosition: yearPosition) }
+            ?? Self.sunDirection(at: hours)
         let degrees = elevation * 180 / .pi
         let key = Self.blend(Self.keys, at: degrees)
         let moon = simd_normalize(SIMD3(-direction.x, max(-direction.y, 0.35), -direction.z))
