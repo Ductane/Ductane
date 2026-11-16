@@ -272,4 +272,42 @@ struct WeatherScheduleTests {
         let read = try JSONDecoder().decode(WeatherSchedule.self, from: Data(odd.utf8))
         #expect(read.seasons?.calendar == .date && read.seasons?.chances[.winter] == [.snow: 2])
     }
+
+    // MARK: Wet ground
+
+    @Test("Rain wets surfaces fast and fills puddles slowly; it dries after, puddles last; never drier than the slider")
+    func wetness() throws {
+        let rainy = WeatherSchedule(chances: [.rain: 1, .clear: 1], shortest: 1800, longest: 3600, seed: 31)
+        var found = false
+        for i in Int64(300_000)..<300_400 {
+            let a = rainy.spell(i), b = rainy.spell(i + 1)
+            guard a.kind == .rain, b.kind == .clear, a.severity > 0.5, b.end - b.start > 1500 else { continue }
+            let early = rainy.builtWet(at: a.start + 240), late = rainy.builtWet(at: a.end)
+            #expect(late.surface > early.surface || late.surface == 1)
+            #expect(late.puddles > early.puddles, "puddles keep filling")
+            #expect(early.surface > early.puddles, "surfaces wet faster than puddles fill")
+            let after = rainy.builtWet(at: b.start + 1200)
+            #expect(after.surface < late.surface, "surfaces dry")
+            #expect(after.puddles > after.surface || after.puddles > 0.05, "puddles linger longer")
+            found = true
+            break
+        }
+        #expect(found)
+        #expect(WeatherSchedule(chances: [.clear: 1]).builtWet(at: Self.now) == (0, 0))
+        // The slider is the least; rain as set wets as it falls.
+        let base = Weather(schedule: WeatherSchedule(chances: [.clear: 1]), wetness: 0.4)
+        #expect(base.current(at: Self.now).wetness == 0.4 && base.current(at: Self.now).puddles == 0.4)
+        let raining = Weather(kind: .rain, severity: 1).current(at: Self.now)
+        #expect(raining.wetness == 1 && raining.puddles > 0.6)
+        #expect(Weather(kind: .snow, severity: 1).current(at: Self.now).wetness == 0, "snow wets nothing")
+        #expect(WeatherSchedule.dryFactor(warmth: 1) > WeatherSchedule.dryFactor(warmth: 0) * 4)
+        // Moving the wetness as set moves the puddles with it.
+        var set = Weather()
+        set.wetness = 0.7
+        #expect(set.puddles == 0.7 && set.current(at: Self.now).puddles == 0.7)
+        // Written and read back; a weather from before wetness is dry.
+        let read = try JSONDecoder().decode(Weather.self, from: JSONEncoder().encode(Weather(wetness: 0.3)))
+        #expect(read.wetness == 0.3 && read.puddles == 0.3)
+        #expect(try JSONDecoder().decode(Weather.self, from: Data(#"{"kind":"rain"}"#.utf8)).wetness == 0)
+    }
 }

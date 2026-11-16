@@ -455,8 +455,13 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         /// **Which layers are soft** — mud, sand — and take footprints, by their place in ``layers``; nil when none is.
         /// ``softness(_:softLayers:)`` turns the weights into how soft each point is.
         public var softLayers: [Int]?
+        /// **Where puddles gather** — little-endian `Float32` a point, 0 never … 1 the first to fill (``heightsData(_:)``'s
+        /// layout): the ground's hollows and brushed puddles, worked out by the editor. A renderer fills them to the
+        /// weather's ``Weather/puddles``, highest first. Nil when none can form.
+        public var puddles: String?
         public init(size: Float, resolution: Int, heights: String = "game/ground.f32", colours: String = "game/ground.rgb",
-                    holes: String? = nil, weights: String? = nil, layers: [String] = [], softLayers: [Int]? = nil) {
+                    holes: String? = nil, weights: String? = nil, layers: [String] = [], softLayers: [Int]? = nil,
+                    puddles: String? = nil) {
             self.size = size
             self.resolution = resolution
             self.heights = heights
@@ -465,6 +470,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
             self.weights = weights
             self.layers = layers
             self.softLayers = softLayers
+            self.puddles = puddles
         }
 
         public init(from decoder: Decoder) throws {
@@ -477,9 +483,12 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
             weights = try c.decodeIfPresent(String.self, forKey: .weights)
             layers = try c.decodeIfPresent([String].self, forKey: .layers) ?? []
             softLayers = (try? c.decodeIfPresent([Int].self, forKey: .softLayers))?.filter { (0..<Self.layerCount).contains($0) }
+            puddles = try? c.decodeIfPresent(String.self, forKey: .puddles)
         }
 
-        private enum CodingKeys: String, CodingKey { case size, resolution, heights, colours, holes, weights, layers, softLayers }
+        private enum CodingKeys: String, CodingKey {
+            case size, resolution, heights, colours, holes, weights, layers, softLayers, puddles
+        }
 
         /// **How soft each point is**, 0…1: the share of its weights in soft layers — where footprints show.
         public static func softness(_ weights: [SIMD8<UInt8>], softLayers: [Int]) -> [Float] {

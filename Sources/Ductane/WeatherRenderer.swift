@@ -52,6 +52,8 @@ public final class WeatherRenderer {
     public nonisolated static let maxDrops = 24_000
     public nonisolated static let maxFlakes = 16_000
     public nonisolated static let maxSplashes = 2_400
+    /// **Places looked at for a roof's edge to drip from**, round the eye: most are not one and draw nothing.
+    public nonisolated static let dripCandidates = 6_000
     /// How far round the eye rain falls, and how tall its box is, metres.
     public nonisolated static let rainBox: (halfWidth: Float, height: Float) = (18, 20)
     public nonisolated static let snowBox: (halfWidth: Float, height: Float) = (16, 16)
@@ -65,6 +67,8 @@ public final class WeatherRenderer {
     private let rainPipeline: MTLRenderPipelineState
     private let snowPipeline: MTLRenderPipelineState
     private let splashPipeline: MTLRenderPipelineState
+    private let dripPipeline: MTLRenderPipelineState
+    private let dripSplashPipeline: MTLRenderPipelineState
     private let depthState: MTLDepthStencilState
     private let argumentTable: MTL4ArgumentTable
     private let frameBuffer: MTLBuffer
@@ -101,6 +105,9 @@ public final class WeatherRenderer {
             rainPipeline = try pipeline("Rain", vertex: "duWeatherRainVertex", fragment: "duWeatherRainFragment")
             snowPipeline = try pipeline("Snow", vertex: "duWeatherSnowVertex", fragment: "duWeatherSnowFragment")
             splashPipeline = try pipeline("Splashes", vertex: "duWeatherSplashVertex", fragment: "duWeatherSplashFragment")
+            dripPipeline = try pipeline("Drips", vertex: "duWeatherDripVertex", fragment: "duWeatherRainFragment")
+            dripSplashPipeline = try pipeline("Drip Splashes", vertex: "duWeatherDripSplashVertex",
+                                              fragment: "duWeatherSplashFragment")
         } catch {
             throw WeatherRendererError.pipelineUnavailable(String(describing: error))
         }
@@ -184,7 +191,7 @@ public final class WeatherRenderer {
             shape: SIMD4(halfWidth, box.height, Float(falling), s.snow ? 0.035 : 0.55),
             light: SIMD4(light, s.snow ? 0.8 : 0.16),
             cover: SIMD4(cover?.top ?? 0, WeatherCover.depthRange, cover == nil ? 0 : 1, Float(cover?.resolution ?? 1)),
-            screen: SIMD4(pixelAngle, fogDensity, min(12, halfWidth * 0.7), 0),
+            screen: SIMD4(pixelAngle, fogDensity, min(12, halfWidth * 0.7), s.snow ? 0 : s.precipitation),
             fog: SIMD4(lighting.horizon, 0))
         let offset = Self.frameStride * frameSlot
         frameBuffer.contents().advanced(by: offset).copyMemory(from: &frame, byteCount: MemoryLayout<Frame>.size)
@@ -200,6 +207,12 @@ public final class WeatherRenderer {
         if splashes > 0, cover != nil {
             encoder.setRenderPipelineState(splashPipeline)
             encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: splashes)
+            // **Drips from roof edges** (2026-11-16): where the cover steps down a metre or more, a drop falls to what is
+            // below and splashes there — found from the cover, nothing placed.
+            encoder.setRenderPipelineState(dripPipeline)
+            encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: Self.dripCandidates)
+            encoder.setRenderPipelineState(dripSplashPipeline)
+            encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: Self.dripCandidates)
         }
         encoder.popDebugGroup()
         return true

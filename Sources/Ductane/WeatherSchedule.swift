@@ -144,9 +144,11 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
         let now = spell(at: time)
         // The snow set lying is the least that lies — in winter: with seasons it thaws away toward summer.
         let cold = warmth(at: time).map { 1 - Self.smooth(0.3, 0.7, $0) } ?? 1
+        let wet = builtWet(at: time)
         var weather = Weather(kind: now.kind, severity: now.severity, windHeading: base.windHeading + now.windTurn,
                               seed: base.seed, lyingSnow: max(base.lyingSnow * cold, builtSnow(at: time)),
-                              snowDepth: base.snowDepth)
+                              snowDepth: base.snowDepth, wetness: max(base.wetness, wet.surface),
+                              puddles: max(base.wetness, wet.puddles))
         guard change > 0, time - now.start < change else { return weather }
         let before = spell(now.index - 1)
         let x = Float(min(max((time - now.start) / change, 0), 1))
@@ -347,6 +349,66 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
         return a.warmth * (1 - t) + b.warmth * t
     }
 
+    // MARK: Wet ground
+
+    /// Gained a second in the heaviest rain: surfaces soaked in four minutes, puddles full in twenty-five.
+    public static let surfaceWets: Double = 1.0 / 240
+    public static let puddlesFill: Double = 1.0 / 1500
+    /// Lost a second with no rain: surfaces dry in twenty minutes, puddles in an hour and a half — faster when warm.
+    public static let surfaceDries: Double = 1.0 / 1200
+    public static let puddlesDrain: Double = 1.0 / 5400
+    /// How far back the wet is counted.
+    public static let wetMemory: Double = 12 * 3600
+
+    /// **How much faster things dry at a warmth**: 0.6 in the middle of winter … 3 in the middle of summer; one without
+    /// seasons.
+    public static func dryFactor(warmth: Float?) -> Double {
+        guard let warmth else { return 1 }
+        return 0.6 * pow(5, Double(min(max(warmth, 0), 1)))
+    }
+
+    /// **How wet the schedule has made things by `time`**: surfaces and puddles, each 0…1 — wetted in rain and storms as
+    /// hard as they fall, dried after, faster when warm; counted over the last ``wetMemory`` from dry, so everyone with
+    /// the clock has the same. The wet by the start of the spell under way is counted once and remembered, as snow is.
+    public func builtWet(at time: Double) -> (surface: Float, puddles: Float) {
+        guard time.isFinite, mayRain else { return (0, 0) }
+        let now = spell(at: time)
+        let start = WetLaid.shared.wet(of: self, atStartOf: now.index) { wetLaid(before: now) }
+        let end = Self.wetted(start, in: now, for: max(time - now.start, 0), warmth: warmth(at: now.start))
+        return (Float(end.surface), Float(end.puddles))
+    }
+
+    func wetLaid(before spell: Spell) -> (surface: Double, puddles: Double) {
+        var t = spell.start - Self.wetMemory
+        var each = self.spell(at: t)
+        var wet = (surface: 0.0, puddles: 0.0)
+        for _ in 0..<100_000 where each.index < spell.index {
+            wet = Self.wetted(wet, in: each, for: max(min(each.end, spell.start) - t, 0), warmth: warmth(at: each.start))
+            t = each.end
+            each = self.spell(each.index + 1)
+        }
+        return wet
+    }
+
+    /// `wet` after `seconds` of `spell`: wetted as hard as it rains, else dried — snow wets nothing.
+    static func wetted(_ wet: (surface: Double, puddles: Double), in spell: Spell, for seconds: Double,
+                       warmth: Float?) -> (surface: Double, puddles: Double) {
+        let falling = Weather.preset(spell.kind, severity: spell.severity)
+        let p = falling.snow ? 0 : Double(falling.precipitation)
+        if p > 0 {
+            return (min(1, wet.surface + p * surfaceWets * seconds), min(1, wet.puddles + p * puddlesFill * seconds))
+        }
+        let dry = dryFactor(warmth: warmth)
+        return (max(0, wet.surface - surfaceDries * dry * seconds), max(0, wet.puddles - puddlesDrain * dry * seconds))
+    }
+
+    /// Whether any chance, in any season, is rain or a storm.
+    var mayRain: Bool {
+        let wets: (Weather.Kind) -> Bool = { $0 == .rain || $0 == .storm }
+        if let seasons { return seasons.chances.values.contains { $0.contains { wets($0.key) && $0.value > 0 } } || mayLaySnow }
+        return chances.contains { wets($0.key) && $0.value > 0 } || (chances[.snow] ?? 0) > 0
+    }
+
     /// **Settings part way from one to another.** Rain turning to snow, or back, eases off before the other begins, so
     /// it never falls as half of each.
     static func blend(_ a: Weather.Settings, _ b: Weather.Settings, _ t: Float) -> Weather.Settings {
@@ -446,7 +508,16 @@ public nonisolated extension Weather {
     /// **The weather at `time`**: the schedule's when it has one and it is on, else this weather as set. What a game draws
     /// and hears each frame; `time` is the game's clock — ``realTime()`` unless it has its own, such as a server's.
     func current(at time: Double) -> Weather {
-        guard let schedule, schedule.isOn else { return self }
+        guard let schedule, schedule.isOn else {
+            // **Rain falling now wets what it falls on** — with no schedule there is no past to count, so the rain as set
+            // wets as hard as it falls, puddles a little less.
+            let s = settings
+            guard s.precipitation > 0, !s.snow else { return self }
+            var wet = self
+            wet.wetness = max(wetness, s.precipitation)
+            wet.puddles = max(wetness, s.precipitation * 0.7)
+            return wet
+        }
         return schedule.weather(at: time, under: self)
     }
 
@@ -472,5 +543,23 @@ nonisolated final class SnowLaid: @unchecked Sendable {
             if entries.count > 8 { entries.removeLast() }
         }
         return snow
+    }
+}
+
+/// **The wet laid by the start of a spell**, remembered as ``SnowLaid`` remembers snow.
+nonisolated final class WetLaid: @unchecked Sendable {
+    static let shared = WetLaid()
+    private let lock = NSLock()
+    private var entries: [(schedule: WeatherSchedule, index: Int64, wet: (surface: Double, puddles: Double))] = []
+
+    func wet(of schedule: WeatherSchedule, atStartOf index: Int64,
+             counting: () -> (surface: Double, puddles: Double)) -> (surface: Double, puddles: Double) {
+        if let known = lock.withLock({ entries.first { $0.index == index && $0.schedule == schedule }?.wet }) { return known }
+        let wet = counting()
+        lock.withLock {
+            entries.insert((schedule, index, wet), at: 0)
+            if entries.count > 8 { entries.removeLast() }
+        }
+        return wet
     }
 }

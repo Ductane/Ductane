@@ -82,9 +82,20 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
     /// **Whether lying snow has depth on the ground** — the ground raised by up to ``deepestSnow`` where it lies — rather
     /// than only whitening it. A game's graphics settings may turn it down (``GraphicsSettings/snowDepth``).
     public var snowDepth: Bool
+    /// **How wet the world is**, 0 dry…1 soaked: what faces the sky darker and shining, whatever falls — a swamp stays
+    /// soaked. Rain wets as it falls; on a schedule the wet builds and dries with the spells — ``current(at:)`` gives the
+    /// amount at a moment, never drier than this.
+    public var wetness: Float {
+        // As set, the puddles are as full as things are wet: a slider moved moves both.
+        didSet { puddles = wetness }
+    }
+    /// **How full the puddles are**, 0…1 — slower than ``wetness`` both ways: they fill through a downpour and linger
+    /// after. What ``current(at:)`` gives; as set, the same as ``wetness``, which sets it.
+    public var puddles: Float
 
     public init(kind: Kind = .clear, severity: Float = 0.5, windHeading: Float = 60, byHand: Settings? = nil,
-                seed: UInt32 = 1, schedule: WeatherSchedule? = nil, lyingSnow: Float = 0, snowDepth: Bool = false) {
+                seed: UInt32 = 1, schedule: WeatherSchedule? = nil, lyingSnow: Float = 0, snowDepth: Bool = false,
+                wetness: Float = 0, puddles: Float? = nil) {
         self.kind = kind
         self.severity = min(max(severity.isFinite ? severity : 0.5, 0), 1)
         self.windHeading = windHeading.isFinite ? windHeading : 60
@@ -93,6 +104,9 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
         self.schedule = schedule
         self.lyingSnow = min(max(lyingSnow.isFinite ? lyingSnow : 0, 0), 1)
         self.snowDepth = snowDepth
+        let wet = min(max(wetness.isFinite ? wetness : 0, 0), 1)
+        self.wetness = wet
+        self.puddles = min(max(puddles.map { $0.isFinite ? $0 : wet } ?? wet, 0), 1)
     }
 
     /// What a file leaves out is the default, and a kind this engine does not know is clear.
@@ -106,7 +120,9 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
                   seed: (try? c.decodeIfPresent(UInt32.self, forKey: .seed)) ?? d.seed,
                   schedule: try? c.decodeIfPresent(WeatherSchedule.self, forKey: .schedule),
                   lyingSnow: (try? c.decodeIfPresent(Float.self, forKey: .lyingSnow)) ?? 0,
-                  snowDepth: (try? c.decodeIfPresent(Bool.self, forKey: .snowDepth)) ?? false)
+                  snowDepth: (try? c.decodeIfPresent(Bool.self, forKey: .snowDepth)) ?? false,
+                  wetness: (try? c.decodeIfPresent(Float.self, forKey: .wetness)) ?? 0,
+                  puddles: try? c.decodeIfPresent(Float.self, forKey: .puddles))
     }
 
     /// A clear sky, no wind to speak of: what a world without weather has.

@@ -2,7 +2,7 @@
 //  WeatherShaders.metal
 //  Ductane
 //
-//  Rain, snow and rain's splashes, for `WeatherRenderer`. Every drop is made in the vertex shader from its number and the
+//  Rain, snow, rain's splashes and drips from roof edges, for `WeatherRenderer`. Every drop is made in the vertex shader from its number and the
 //  time — nothing is simulated or stored — in a box that follows the eye. Compiled at runtime from source when the package
 //  was built by `swift build`, which produces no metallib — see `ShaderLibrary`.
 //
@@ -19,7 +19,7 @@ struct DUWeatherFrame {
     float4 shape;     // x the box's half width, y its height, z drops drawn, w a drop's length (rain) or size (snow)
     float4 light;     // rgb the light on a drop, linear; a its opacity
     float4 cover;     // x the cover's top, y its depth range, z whether there is one, w its texels a side
-    float4 screen;    // x the angle a pixel spans; y the fog's density; z splashes' reach, m; w unused
+    float4 screen;    // x the angle a pixel spans; y the fog's density; z splashes' reach, m; w how hard it rains, 0…1
     float4 fog;       // rgb what distance fades into
 };
 
@@ -194,4 +194,87 @@ fragment float4 duWeatherSplashFragment(DUWeatherOut in [[stage_in]], constant D
     const float ring = smoothstep(0.55, 0.85, r) * (1.0 - smoothstep(0.85, 1.0, r));
     const float a = ring * in.opacity * f.light.a * 0.8;
     return float4(f.light.rgb * a, a * 0.6);
+}
+
+// MARK: - Drips
+
+/// Where drip `iid` is: a place fixed in the world near the eye; whether it is at a roof's edge — the cover a metre or
+/// more lower a quarter of a metre away; where it falls from and to; and how far through its fall it is.
+struct DUDrip {
+    bool edge;
+    float3 head;
+    float low;
+    float t;
+    float fallTime;
+};
+
+static DUDrip duWeatherDrip(uint iid, constant DUWeatherFrame &f, depth2d<float> cover)
+{
+    DUDrip d;
+    const float tile = 20.0;
+    const float3 h = duWeatherHash3(iid * 977u + 13u);
+    const float2 local = h.xy * tile;
+    const float2 place = local + tile * floor((f.eye.xz - local) / tile + 0.5);
+    const float3 at = float3(place.x, f.eye.y, place.y);
+    const float top = duWeatherCover(at, f, cover);
+    float low = top;
+    float2 way = float2(0);
+    const float2 ways[4] = { float2(0.25, 0), float2(-0.25, 0), float2(0, 0.25), float2(0, -0.25) };
+    for (int k = 0; k < 4; k++) {
+        const float there = duWeatherCover(at + float3(ways[k].x, 0, ways[k].y), f, cover);
+        if (there > -1e8 && there < low) { low = there; way = ways[k]; }
+    }
+    d.edge = top > -1e8 && top - low > 1.0 && top < f.eye.y + 20.0 && top > f.eye.y - 30.0;
+    const float drop = max(top - low, 0.01);
+    d.fallTime = sqrt(2.0 * drop / 9.8);
+    // A drop gathers, falls, and the next gathers: each edge at its own pace.
+    const float period = d.fallTime + 0.5 + h.z * 1.8;
+    d.t = fmod(f.eye.w + h.z * 37.0, period);
+    d.low = low;
+    const float y = top - 0.03 - 4.9 * d.t * d.t;
+    d.head = float3(place.x + way.x * 1.2, max(y, low), place.y + way.y * 1.2);
+    return d;
+}
+
+/// **A drip falling from a roof's edge** while it rains: a short streak, drawn as rain is.
+vertex DUWeatherOut duWeatherDripVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
+                                        constant DUWeatherFrame &f [[buffer(0)]],
+                                        depth2d<float> cover [[texture(0)]])
+{
+    DUWeatherOut out;
+    const DUDrip d = duWeatherDrip(iid, f, cover);
+    const bool falling = d.edge && d.t < d.fallTime;
+    const float speed = 9.8 * d.t;
+    const float3 head = d.head;
+    const float3 tail = head + float3(0, 0.05 + speed * 0.012, 0);
+    const float2 corner = duWeatherCorners[vid];
+    const float3 p = mix(tail, head, corner.y);
+    float3 side = cross(float3(0, 1, 0), f.eye.xyz - p);
+    side = length(side) > 1e-5 ? normalize(side) : float3(1, 0, 0);
+    const float width = max(0.008, distance(p, f.eye.xyz) * f.screen.x * 0.75);
+    out.position = f.viewProjection * float4(p + side * corner.x * width, 1.0);
+    out.uv = corner;
+    out.opacity = falling ? duWeatherFade(head, f) * min(1.0, 3.0 * f.screen.w) : 0.0;
+    if (!falling) out.position = float4(0, 0, -1, 1);
+    return out;
+}
+
+/// **Where a drip lands**: a small ring for a quarter of a second, drawn as a splash is.
+vertex DUWeatherOut duWeatherDripSplashVertex(uint vid [[vertex_id]], uint iid [[instance_id]],
+                                              constant DUWeatherFrame &f [[buffer(0)]],
+                                              depth2d<float> cover [[texture(0)]])
+{
+    DUWeatherOut out;
+    const DUDrip d = duWeatherDrip(iid, f, cover);
+    const float since = d.t - d.fallTime;
+    const bool landed = d.edge && since >= 0.0 && since < 0.3;
+    const float life = saturate(since / 0.3);
+    const float size = 0.03 + 0.1 * life;
+    const float2 corner = duWeatherCorners[vid] * float2(1, 2) - float2(0, 1);
+    const float3 at = float3(d.head.x, d.low, d.head.z);
+    out.position = f.viewProjection * float4(at + float3(corner.x, 0.02, corner.y) * size, 1.0);
+    out.uv = corner;
+    out.opacity = landed ? (1.0 - life) * duWeatherFade(at, f) * min(1.0, 2.0 * f.screen.w) : 0.0;
+    if (!landed) out.position = float4(0, 0, -1, 1);
+    return out;
 }
