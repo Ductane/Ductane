@@ -452,8 +452,11 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         public var weights: String?
         /// The painted layers' names, in the weights' order.
         public var layers: [String]
+        /// **Which layers are soft** — mud, sand — and take footprints, by their place in ``layers``; nil when none is.
+        /// ``softness(_:softLayers:)`` turns the weights into how soft each point is.
+        public var softLayers: [Int]?
         public init(size: Float, resolution: Int, heights: String = "game/ground.f32", colours: String = "game/ground.rgb",
-                    holes: String? = nil, weights: String? = nil, layers: [String] = []) {
+                    holes: String? = nil, weights: String? = nil, layers: [String] = [], softLayers: [Int]? = nil) {
             self.size = size
             self.resolution = resolution
             self.heights = heights
@@ -461,6 +464,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
             self.holes = holes
             self.weights = weights
             self.layers = layers
+            self.softLayers = softLayers
         }
 
         public init(from decoder: Decoder) throws {
@@ -472,9 +476,17 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
             holes = try c.decodeIfPresent(String.self, forKey: .holes)
             weights = try c.decodeIfPresent(String.self, forKey: .weights)
             layers = try c.decodeIfPresent([String].self, forKey: .layers) ?? []
+            softLayers = (try? c.decodeIfPresent([Int].self, forKey: .softLayers))?.filter { (0..<Self.layerCount).contains($0) }
         }
 
-        private enum CodingKeys: String, CodingKey { case size, resolution, heights, colours, holes, weights, layers }
+        private enum CodingKeys: String, CodingKey { case size, resolution, heights, colours, holes, weights, layers, softLayers }
+
+        /// **How soft each point is**, 0…1: the share of its weights in soft layers — where footprints show.
+        public static func softness(_ weights: [SIMD8<UInt8>], softLayers: [Int]) -> [Float] {
+            let soft = softLayers.filter { (0..<layerCount).contains($0) }
+            guard !soft.isEmpty else { return Array(repeating: 0, count: weights.count) }
+            return weights.map { w in min(1, Float(soft.reduce(0) { $0 + Int(w[$1]) }) / 255) }
+        }
 
         /// The grid sizes a ground may have, in cells a side: 16,384 is 268 million points, far past any world's and still
         /// clear of overflowing a point count or a file size.
