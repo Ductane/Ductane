@@ -254,6 +254,72 @@ struct SoundscapeTests {
         #expect(try rms(scape.audio, seconds: 0.3) > 0.001, "its second came: a sound")
     }
 
+    // MARK: Day and night
+
+    @Test("Daylight from the sun: night 6° below the horizon, day 4° above; hours weigh by it")
+    func daylight() {
+        let degree = Float.pi / 180
+        #expect(Soundscape.daylight(sunElevation: -10 * degree) == 0)
+        #expect(Soundscape.daylight(sunElevation: 10 * degree) == 1)
+        #expect(abs(Soundscape.daylight(sunElevation: -1 * degree) - 0.5) < 0.01)
+        #expect(Soundscape.daylight(sunElevation: .nan) == 1)
+        typealias Hours = WorldFile.Sounds.Hours
+        #expect(Hours.always.weight(daylight: 0) == 1 && Hours.day.weight(daylight: 0.25) == 0.25)
+        #expect(Hours.night.weight(daylight: 0.25) == 0.75 && Hours.day.weight(daylight: .nan) == 1)
+    }
+
+    @Test("An ambience with a night loop plays its day loop by day, its night loop by night, and both through dusk")
+    func nightAmbience() async throws {
+        let audio = try engine()
+        try audio.load("crickets", samples: Self.noise, sampleRate: Self.rate)
+        let scape = Soundscape(audio: audio)
+        await scape.play(WorldFile.Sounds(files: ["noise", "crickets"], ambiences: [.init(sound: 0, night: 1, volume: 1)])) {
+            URL(filePath: "/nonexistent/\($0)")
+        }
+        walk(scape, to: .zero)
+        #expect(scape.playingCount == 1, "day: the day loop")
+        _ = try rms(audio, seconds: 0.05)
+        let day = try rms(audio, seconds: 0.3)
+        scape.setDaylight(0.5)
+        walk(scape, to: .zero)
+        #expect(scape.playingCount == 2, "dusk: both, each at half")
+        scape.setDaylight(0)
+        walk(scape, to: .zero)
+        #expect(scape.playingCount == 1, "night: the night loop")
+        _ = try rms(audio, seconds: 0.05)
+        #expect(abs(try rms(audio, seconds: 0.3) / day - 1) < 0.15, "as loud by night as by day")
+        // One loop and no night loop plays day and night.
+        await scape.play(WorldFile.Sounds(files: ["noise"], ambiences: [.init(sound: 0, volume: 1)])) { URL(filePath: $0) }
+        walk(scape, to: .zero)
+        #expect(scape.playingCount == 1)
+    }
+
+    @Test("A loop heard by night fades in as the light goes; scattered sounds by day are silent at night")
+    func hours() async throws {
+        let scape = try await world(WorldFile.Sounds(files: ["noise"], points: [.init(sound: 0, position: .zero, reach: 20,
+                                                                                      hours: .night)]))
+        walk(scape, to: SIMD3(2, 0, 0))
+        #expect(scape.playingCount == 0, "a night loop by day: nothing")
+        scape.setDaylight(0)
+        walk(scape, to: SIMD3(2, 0, 0))
+        #expect(scape.playingCount == 1)
+        scape.setDaylight(1)
+        walk(scape, to: SIMD3(2, 0, 0))
+        #expect(scape.playingCount == 0, "gone again at dawn")
+
+        let crows = try await world(WorldFile.Sounds(files: ["noise"], scattered: [
+            .init(sounds: [0], shortest: 1, longest: 1, volume: 1, reach: 30, height: 0, hours: .day)]))
+        crows.setDaylight(0)
+        walk(crows, to: .zero, seconds: 0.5)
+        walk(crows, to: .zero, seconds: 0.6)
+        #expect(try rms(crows.audio, seconds: 0.3) < 1e-4, "crows by day are silent at night")
+        crows.setDaylight(1)
+        walk(crows, to: .zero, seconds: 0.5)
+        walk(crows, to: .zero, seconds: 0.6)
+        _ = try rms(crows.audio, seconds: 0.02)
+        #expect(try rms(crows.audio, seconds: 0.3) > 0.001, "and heard by day")
+    }
+
     // MARK: The world file
 
     @Test("A world's sounds survive the world file, and one naming a file it has not, or outside its package, is refused")
@@ -267,6 +333,19 @@ struct SoundscapeTests {
             music: .init(tracks: [2], volume: 0.3))
         let read = try WorldFile.read(world.data())
         #expect(read == world)
+        // Day and night: a night loop and hours survive; always is not written, and an hour not known is always.
+        var nights = world
+        nights.sounds?.ambiences[0].night = 1
+        nights.sounds?.points[0].hours = .night
+        nights.sounds?.scattered[0].hours = .day
+        #expect(try WorldFile.read(nights.data()) == nights)
+        #expect(!String(decoding: try JSONEncoder().encode(world.sounds), as: UTF8.self).contains("hours"))
+        let odd = try JSONDecoder().decode(WorldFile.Sounds.Point.self,
+                                           from: Data(#"{"sound":0,"position":[0,0,0],"hours":"dusk"}"#.utf8))
+        #expect(odd.hours == .always && odd.volume == 1 && odd.reach == 20)
+        var badNight = world
+        badNight.sounds?.ambiences[0].night = 7
+        #expect(throws: WorldFile.ReadError.badSound(7)) { try WorldFile.read(badNight.data()) }
         // A file from before sounds has none.
         #expect(try WorldFile.read(WorldFile(name: "w", props: [], placements: []).data()).sounds == nil)
         // Only the files are required.

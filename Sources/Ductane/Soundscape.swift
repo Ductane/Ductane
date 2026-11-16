@@ -7,8 +7,8 @@ import Foundation
 import simd
 
 /// **A world's sounds, played as its editor laid them out** (``WorldFile/Sounds``): loops at places that start as the
-/// listener comes within their reach and stop when they are left behind, ambience that rises and falls by area, sounds
-/// now and then, and the world's music.
+/// listener comes within their reach and stop when they are left behind, ambience that rises and falls by area — and
+/// gives way to its night loop as the light goes — sounds now and then, by day, by night or always, and the world's music.
 ///
 /// A game makes one beside its ``AudioEngine`` and ``MusicPlayer``, hands it the world's sounds once, and tells it where
 /// the ears are every frame. **What a game keeps**: when the world is heard at all — ``pause()`` under a menu — and any
@@ -26,8 +26,12 @@ public final class Soundscape {
 
     /// Loops playing, by point, with the file each plays.
     private var points: [Int: (loop: AudioEngine.Loop, file: String)] = [:]
-    /// Ambient beds playing, by ambience, with the file each plays.
+    /// Ambient beds playing, by ambience, with the file each plays — by day, or day and night when it has one loop.
     private var beds: [Int: (loop: AudioEngine.Loop, file: String)] = [:]
+    /// Ambiences' night loops playing, by ambience.
+    private var nightBeds: [Int: (loop: AudioEngine.Loop, file: String)] = [:]
+    /// **How much of day it is where the ears are**, 0 night … 1 day — ``setDaylight(_:)``.
+    public private(set) var daylight: Float = 1
     /// Seconds until each scattered area's next sound.
     private var waits: [Int: Float] = [:]
     private var variation = SoundVariation(pitchSpread: 0, gainSpreadDecibels: 2)
@@ -85,12 +89,17 @@ public final class Soundscape {
             let point = sounds.points[i]
             audio.moveLoop(playing.loop, to: point.position)
             audio.setLoopReach(playing.loop, to: point.reach)
-            audio.setLoopVolume(playing.loop, to: point.volume)
+            audio.setLoopVolume(playing.loop, to: point.volume * point.hours.weight(daylight: daylight))
         }
         for (i, playing) in beds where !sounds.ambiences.indices.contains(i)
             || file(of: sounds.ambiences[i].sound) != playing.file {
             audio.stopLoop(playing.loop)
             beds[i] = nil
+        }
+        for (i, playing) in nightBeds where !sounds.ambiences.indices.contains(i)
+            || sounds.ambiences[i].night.flatMap(file(of:)) != playing.file {
+            audio.stopLoop(playing.loop)
+            nightBeds[i] = nil
         }
         waits = waits.filter { sounds.scattered.indices.contains($0.key) }
         if let music {
@@ -122,6 +131,21 @@ public final class Soundscape {
         refresh()
         scatter(elapsed: max(seconds.isFinite ? seconds : 0, 0))
         thunder()
+    }
+
+    /// **How much of day it is, 0 night … 1 day** (2026-11-16) — what an ambience's night loop, and sounds heard only by
+    /// day or by night, follow. 1 until set: a world with no clock is always day. Once a frame, or whenever it changes;
+    /// ``daylight(sunElevation:)`` makes it from the sun.
+    public func setDaylight(_ amount: Float) {
+        daylight = amount.isFinite ? min(max(amount, 0), 1) : 1
+    }
+
+    /// **Daylight from the sun's height**, radians (``DaySky/Lighting/elevation``): night once it is 6° below the horizon,
+    /// day once it is 4° above — the birds giving way to the crickets through dusk, and back at dawn.
+    public static func daylight(sunElevation radians: Float) -> Float {
+        guard radians.isFinite else { return 1 }
+        let t = min(max((radians * 180 / .pi + 6) / 10, 0), 1)
+        return t * t * (3 - 2 * t)
     }
 
     /// **The weather to hear, and the time on its clock** — the one lightning is drawn by, so a flash and its thunder
@@ -198,38 +222,51 @@ public final class Soundscape {
         guard !isPaused else { return }
         for (i, point) in sounds.points.enumerated() {
             let distance = simd_distance(point.position, listener)
+            let weight = point.hours.weight(daylight: daylight)
             if let playing = points[i] {
-                // Left a little way past its reach, so walking along the edge does not start and stop it.
-                if distance > point.reach * 1.2 + 5 {
+                // Left a little way past its reach, so walking along the edge does not start and stop it; out of its
+                // hours, once faded away.
+                if distance > point.reach * 1.2 + 5 || weight <= 0 {
                     audio.stopLoop(playing.loop)
                     points[i] = nil
+                } else if point.hours != .always {
+                    audio.setLoopVolume(playing.loop, to: point.volume * weight)
                 }
-            } else if distance < point.reach, let path = file(of: point.sound),
-                      let loop = audio.startLoop(path, at: point.position, volume: point.volume, reach: point.reach) {
+            } else if distance < point.reach, weight > 0, let path = file(of: point.sound),
+                      let loop = audio.startLoop(path, at: point.position, volume: point.volume * weight, reach: point.reach) {
                 points[i] = (loop, path)
             }
         }
         let here = SIMD2(listener.x, listener.z)
         for (i, ambience) in sounds.ambiences.enumerated() {
             let level = ambience.volume * SoundArea.presence(ambience.outline, fade: ambience.fade, at: here)
-            if let playing = beds[i] {
-                if level <= 0 {
-                    audio.stopLoop(playing.loop)
-                    beds[i] = nil
-                } else {
-                    audio.setAmbienceVolume(playing.loop, to: level)
-                }
-            } else if level > 0, let path = file(of: ambience.sound), let loop = audio.startAmbience(path, volume: level) {
-                beds[i] = (loop, path)
+            let night = ambience.night.flatMap(file(of:))
+            bed(&beds, i, file: file(of: ambience.sound), level: night == nil ? level : level * daylight)
+            bed(&nightBeds, i, file: night, level: level * (1 - daylight))
+        }
+    }
+
+    /// Starts, sets or stops one ambience bed at a level.
+    private func bed(_ playing: inout [Int: (loop: AudioEngine.Loop, file: String)], _ i: Int, file path: String?,
+                     level: Float) {
+        if let current = playing[i] {
+            if level <= 0 || current.file != path {
+                audio.stopLoop(current.loop)
+                playing[i] = nil
+            } else {
+                audio.setAmbienceVolume(current.loop, to: level)
+                return
             }
         }
+        if level > 0, let path, let loop = audio.startAmbience(path, volume: level) { playing[i] = (loop, path) }
     }
 
     /// Counts down each scattered area within reach, and sounds it when its time comes.
     private func scatter(elapsed seconds: Float) {
         let here = SIMD2(listener.x, listener.z)
         for (i, area) in sounds.scattered.enumerated() where !area.sounds.isEmpty {
-            guard SoundArea.distanceOutside(area.outline, here) < area.reach else { continue }
+            let weight = area.hours.weight(daylight: daylight)
+            guard SoundArea.distanceOutside(area.outline, here) < area.reach, weight >= 0.5 else { continue }
             var wait = waits[i] ?? Self.interval(area, using: &random)
             wait -= seconds
             if wait <= 0 {
@@ -237,7 +274,7 @@ public final class Soundscape {
                     let take = variation.take(for: "scattered \(i)", among: area.sounds.count, using: &random)
                     let gain = variation.jitter(using: &random).gain
                     if let path = file(of: area.sounds[take]) {
-                        audio.playAmbient(path, at: place, volume: min(area.volume * gain, 1), reach: area.reach)
+                        audio.playAmbient(path, at: place, volume: min(area.volume * gain * weight, 1), reach: area.reach)
                     }
                 }
                 wait = Self.interval(area, using: &random)
@@ -275,7 +312,7 @@ public final class Soundscape {
     }
 
     /// Loops and beds playing — for a test, or a game's statistics.
-    public var playingCount: Int { points.count + beds.count + (rainBed == nil ? 0 : 1) + (windBed == nil ? 0 : 1) }
+    public var playingCount: Int { points.count + beds.count + nightBeds.count + (rainBed == nil ? 0 : 1) + (windBed == nil ? 0 : 1) }
 
     /// **Holds the world's sound** — under a menu, in a paused editor — stopping every loop and bed; ``resume()`` starts
     /// what is in reach again. The music is held too, when it is the world's.
@@ -305,9 +342,11 @@ public final class Soundscape {
     private func stopLoops() {
         for playing in points.values { audio.stopLoop(playing.loop) }
         for playing in beds.values { audio.stopLoop(playing.loop) }
+        for playing in nightBeds.values { audio.stopLoop(playing.loop) }
         for playing in [rainBed, windBed].compactMap({ $0 }) { audio.stopLoop(playing.loop) }
         points = [:]
         beds = [:]
+        nightBeds = [:]
         rainBed = nil
         windBed = nil
         thunders = []

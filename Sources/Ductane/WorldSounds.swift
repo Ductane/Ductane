@@ -41,6 +41,22 @@ extension WorldFile {
                 && (weather?.isEmpty ?? true)
         }
 
+        /// **When in the day a sound is heard** (2026-11-16): always, by day, or by night — crows by day, frogs by night.
+        /// The listener's daylight (``Soundscape/setDaylight(_:)``) fades one in as the other goes, over dawn and dusk.
+        public enum Hours: String, Codable, Sendable, CaseIterable {
+            case always, day, night
+
+            /// How much of a sound with these hours is heard at `daylight`, 0 night … 1 day.
+            public func weight(daylight: Float) -> Float {
+                let d = daylight.isFinite ? min(max(daylight, 0), 1) : 1
+                switch self {
+                case .always: return 1
+                case .day: return d
+                case .night: return 1 - d
+                }
+            }
+        }
+
         /// **A loop at a place** — a generator's hum, a fire, a drip: full near it, gone at its reach (``SoundReach``).
         public struct Point: Codable, Equatable, Sendable {
             /// An index into ``Sounds/files``.
@@ -50,29 +66,70 @@ extension WorldFile {
             public var volume: Float
             /// Metres: heard no further than this.
             public var reach: Float
-            public init(sound: Int, position: SIMD3<Float>, volume: Float = 1, reach: Float = 20) {
+            /// When in the day it is heard.
+            public var hours: Hours
+            public init(sound: Int, position: SIMD3<Float>, volume: Float = 1, reach: Float = 20, hours: Hours = .always) {
                 self.sound = sound
                 self.position = position
                 self.volume = volume
                 self.reach = reach
+                self.hours = hours
             }
+
+            /// What a file leaves out is always heard; an hour this engine does not know is too.
+            public init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                self.init(sound: try c.decode(Int.self, forKey: .sound),
+                          position: try c.decode(SIMD3<Float>.self, forKey: .position),
+                          volume: try c.decodeIfPresent(Float.self, forKey: .volume) ?? 1,
+                          reach: try c.decodeIfPresent(Float.self, forKey: .reach) ?? 20,
+                          hours: Hours.read(c, .hours))
+            }
+
+            public func encode(to encoder: Encoder) throws {
+                var c = encoder.container(keyedBy: CodingKeys.self)
+                try c.encode(sound, forKey: .sound)
+                try c.encode(position, forKey: .position)
+                try c.encode(volume, forKey: .volume)
+                try c.encode(reach, forKey: .reach)
+                if hours != .always { try c.encode(hours, forKey: .hours) }
+            }
+
+            private enum CodingKeys: String, CodingKey { case sound, position, volume, reach, hours }
         }
 
         /// **A background loop over an area** — wind across a field, a marsh, a room's tone: heard the same everywhere
-        /// inside its outline and in both ears, fading to nothing ``fade`` metres outside it.
+        /// inside its outline and in both ears, fading to nothing ``fade`` metres outside it. **With a ``night`` recording
+        /// (2026-11-16)** — cicadas by day, crickets and frogs by night — one gives way to the other over dawn and dusk.
         public struct Ambience: Codable, Equatable, Sendable {
+            /// The loop — by day, when there is a ``night`` one.
             public var sound: Int
+            /// The loop heard at night in its place; nil plays ``sound`` day and night.
+            public var night: Int?
             /// The area's corners on the ground, in order; empty for the whole world.
             public var outline: [SIMD2<Float>]
             /// Metres outside the outline over which it fades away.
             public var fade: Float
             public var volume: Float
-            public init(sound: Int, outline: [SIMD2<Float>] = [], fade: Float = 10, volume: Float = 0.6) {
+            public init(sound: Int, night: Int? = nil, outline: [SIMD2<Float>] = [], fade: Float = 10, volume: Float = 0.6) {
                 self.sound = sound
+                self.night = night
                 self.outline = outline
                 self.fade = fade
                 self.volume = volume
             }
+
+            /// What a file leaves out is the default; no night loop plays the one loop day and night.
+            public init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                self.init(sound: try c.decode(Int.self, forKey: .sound),
+                          night: try c.decodeIfPresent(Int.self, forKey: .night),
+                          outline: try c.decodeIfPresent([SIMD2<Float>].self, forKey: .outline) ?? [],
+                          fade: try c.decodeIfPresent(Float.self, forKey: .fade) ?? 10,
+                          volume: try c.decodeIfPresent(Float.self, forKey: .volume) ?? 0.6)
+            }
+
+            private enum CodingKeys: String, CodingKey { case sound, night, outline, fade, volume }
         }
 
         /// **A sound now and then somewhere in an area** — a crow, a creak, distant metal: one of ``sounds`` at a time,
@@ -90,8 +147,10 @@ extension WorldFile {
             public var reach: Float
             /// **Up to how far above the listener's ears** a sound may be — a crow in a tree, a creak in a roof.
             public var height: Float
+            /// When in the day they are heard: sounded only while it is more their time than not, as loud as it is.
+            public var hours: Hours
             public init(sounds: [Int], outline: [SIMD2<Float>] = [], shortest: Float = 8, longest: Float = 20,
-                        volume: Float = 0.8, reach: Float = 40, height: Float = 3) {
+                        volume: Float = 0.8, reach: Float = 40, height: Float = 3, hours: Hours = .always) {
                 self.sounds = sounds
                 self.outline = outline
                 self.shortest = shortest
@@ -99,7 +158,35 @@ extension WorldFile {
                 self.volume = volume
                 self.reach = reach
                 self.height = height
+                self.hours = hours
             }
+
+            /// What a file leaves out is the default.
+            public init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                self.init(sounds: try c.decode([Int].self, forKey: .sounds),
+                          outline: try c.decodeIfPresent([SIMD2<Float>].self, forKey: .outline) ?? [],
+                          shortest: try c.decodeIfPresent(Float.self, forKey: .shortest) ?? 8,
+                          longest: try c.decodeIfPresent(Float.self, forKey: .longest) ?? 20,
+                          volume: try c.decodeIfPresent(Float.self, forKey: .volume) ?? 0.8,
+                          reach: try c.decodeIfPresent(Float.self, forKey: .reach) ?? 40,
+                          height: try c.decodeIfPresent(Float.self, forKey: .height) ?? 3,
+                          hours: Hours.read(c, .hours))
+            }
+
+            public func encode(to encoder: Encoder) throws {
+                var c = encoder.container(keyedBy: CodingKeys.self)
+                try c.encode(sounds, forKey: .sounds)
+                try c.encode(outline, forKey: .outline)
+                try c.encode(shortest, forKey: .shortest)
+                try c.encode(longest, forKey: .longest)
+                try c.encode(volume, forKey: .volume)
+                try c.encode(reach, forKey: .reach)
+                try c.encode(height, forKey: .height)
+                if hours != .always { try c.encode(hours, forKey: .hours) }
+            }
+
+            private enum CodingKeys: String, CodingKey { case sounds, outline, shortest, longest, volume, reach, height, hours }
         }
 
         /// **The world's music**: one track looped, or several in turn (``MusicPlayer/play(playlist:)``).
@@ -147,7 +234,8 @@ extension WorldFile {
 
         /// Every index into ``files`` the sounds name — what reading checks.
         var named: [Int] {
-            points.map(\.sound) + ambiences.map(\.sound) + scattered.flatMap(\.sounds) + (music?.tracks ?? [])
+            points.map(\.sound) + ambiences.map(\.sound) + ambiences.compactMap(\.night) + scattered.flatMap(\.sounds)
+                + (music?.tracks ?? [])
                 + [weather?.rain, weather?.wind].compactMap { $0 } + (weather?.thunder ?? [])
         }
 
@@ -163,6 +251,13 @@ extension WorldFile {
         }
 
         private enum CodingKeys: String, CodingKey { case files, points, ambiences, scattered, music, weather }
+    }
+}
+
+nonisolated extension WorldFile.Sounds.Hours {
+    /// The hours a file names; always when it names none, or one this engine does not know.
+    static func read<K: CodingKey>(_ c: KeyedDecodingContainer<K>, _ key: K) -> Self {
+        ((try? c.decodeIfPresent(String.self, forKey: key)) ?? nil).flatMap(Self.init(rawValue:)) ?? .always
     }
 }
 
