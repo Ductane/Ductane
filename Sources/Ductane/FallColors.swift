@@ -77,8 +77,14 @@ public nonisolated struct FallColors: Sendable, Equatable, Codable {
     /// **A tree's own two numbers, 0…1, from where it stands**: how early or late it turns, and which colour it takes.
     /// An integer hash of its place to a quarter metre, so a renderer's copy gives the same numbers bit for bit.
     public static func seed(x: Float, z: Float) -> (timing: Float, pick: Float) {
-        let qx = UInt32(bitPattern: Int32(truncatingIfNeeded: Int((x * 4).rounded(.down))))
-        let qz = UInt32(bitPattern: Int32(truncatingIfNeeded: Int((z * 4).rounded(.down))))
+        // **Never traps**: a place comes from a world file anyone can write, so a NaN, an infinity or a number past what an
+        // `Int32` holds is clamped first — a GPU's float-to-int conversion saturates the same way.
+        func quarter(_ v: Float) -> UInt32 {
+            guard v.isFinite else { return 0 }
+            let q = min(max((v * 4).rounded(.down), Float(Int32.min)), Float(Int32.max) - 128)
+            return UInt32(bitPattern: Int32(q))
+        }
+        let qx = quarter(x), qz = quarter(z)
         var h = (qx &* 73_856_093) ^ (qz &* 19_349_663)
         h = h &* 747_796_405 &+ 2_891_336_453
         h = ((h >> ((h >> 28) &+ 4)) ^ h) &* 277_803_737

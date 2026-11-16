@@ -64,6 +64,8 @@ struct FallColorsTests {
         #expect(a.timing == FallColors.seed(x: 12.3, z: -40.1).timing)
         let picks = (0..<400).map { FallColors.seed(x: Float($0) * 1.7, z: Float($0 % 13) * 3.1).pick }
         #expect(picks.min()! < 0.1 && picks.max()! > 0.9)
+        // A place from a file anyone can write never traps.
+        for bad: Float in [.nan, .infinity, -.infinity, 1e30, -1e30] { _ = FallColors.seed(x: bad, z: bad) }
     }
 
     @Test("Saved and read back; a file missing values reads as the defaults")
