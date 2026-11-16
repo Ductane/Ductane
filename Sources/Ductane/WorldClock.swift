@@ -34,9 +34,12 @@ public nonisolated struct WorldClock: Sendable, Equatable, Codable {
     public var calendar: Calendar
     /// Degrees, north positive: the sun's path, and the hemisphere — winter falls in July south of the equator.
     public var latitude: Float
+    /// **Foliage through the year** on this calendar (``FallColors``): trees turning, bare in winter, grass gone straw.
+    public var foliage: FallColors
 
     public init(runsDay: Bool = true, dayLength: Double = 3600, nightSpeed: Double = 2,
-                calendar: Calendar = .days(perSeason: 7), latitude: Float = 45) {
+                calendar: Calendar = .days(perSeason: 7), latitude: Float = 45, foliage: FallColors = FallColors()) {
+        self.foliage = foliage
         self.runsDay = runsDay
         self.dayLength = dayLength.isFinite ? min(max(dayLength, Self.dayLengths.lowerBound), Self.dayLengths.upperBound) : 3600
         self.nightSpeed = nightSpeed.isFinite ? min(max(nightSpeed, 1), 8) : 2
@@ -116,9 +119,15 @@ public nonisolated struct WorldClock: Sendable, Equatable, Codable {
 
     static func wrapped(_ x: Double) -> Double { x - x.rounded(.down) }
 
+    /// **Where foliage is in its year at `time`** (``FallColors/phase(yearPosition:southern:)``): 0 midsummer, 1 the
+    /// middle of autumn, 2 of winter, 3 of spring, where the world is.
+    public func foliagePhase(at time: Double) -> Float {
+        FallColors.phase(yearPosition: yearPosition(at: time), southern: southern)
+    }
+
     // MARK: Coding
 
-    private enum CodingKeys: String, CodingKey { case runsDay, dayLength, nightSpeed, calendar, daysPerSeason, latitude }
+    private enum CodingKeys: String, CodingKey { case runsDay, dayLength, nightSpeed, calendar, daysPerSeason, latitude, foliage }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -132,7 +141,8 @@ public nonisolated struct WorldClock: Sendable, Equatable, Codable {
         self.init(runsDay: (try? c.decodeIfPresent(Bool.self, forKey: .runsDay)) ?? d.runsDay,
                   dayLength: (try? c.decodeIfPresent(Double.self, forKey: .dayLength)) ?? d.dayLength,
                   nightSpeed: (try? c.decodeIfPresent(Double.self, forKey: .nightSpeed)) ?? d.nightSpeed,
-                  calendar: calendar, latitude: (try? c.decodeIfPresent(Float.self, forKey: .latitude)) ?? d.latitude)
+                  calendar: calendar, latitude: (try? c.decodeIfPresent(Float.self, forKey: .latitude)) ?? d.latitude,
+                  foliage: (try? c.decodeIfPresent(FallColors.self, forKey: .foliage)) ?? d.foliage)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -148,5 +158,6 @@ public nonisolated struct WorldClock: Sendable, Equatable, Codable {
         case .realDate: try c.encode("realDate", forKey: .calendar)
         }
         try c.encode(latitude, forKey: .latitude)
+        try c.encode(foliage, forKey: .foliage)
     }
 }
