@@ -206,7 +206,7 @@ public final class VolumetricFog {
               let blank = device.makeTexture(descriptor: blankDescriptor) else {
             throw FrameRendererError.couldNotCreate("fog blanks")
         }
-        let zero = [Float16](repeating: 0, count: 2)
+        let zero = [UInt16](repeating: 0, count: 2)
         zero.withUnsafeBytes { blank.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: $0.baseAddress!,
                                              bytesPerRow: 4) }
         blankDepth = depth

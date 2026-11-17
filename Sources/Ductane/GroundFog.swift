@@ -152,10 +152,10 @@ public nonisolated struct FogFloor: Sendable, Equatable {
         descriptor.storageMode = .shared
         guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
         texture.label = "Fog Floor"
-        var texels = [Float16](repeating: 0, count: side * side * 2)
+        var texels = [UInt16](repeating: 0, count: side * side * 2)
         for i in 0..<(side * side) {
-            texels[i * 2] = Float16(heights[i])
-            texels[i * 2 + 1] = Float16(water[i])
+            texels[i * 2] = EnvironmentMap.halfBits(heights[i])
+            texels[i * 2 + 1] = EnvironmentMap.halfBits(water[i])
         }
         texels.withUnsafeBytes { raw in
             texture.replace(region: MTLRegionMake2D(0, 0, side, side), mipmapLevel: 0, withBytes: raw.baseAddress!,

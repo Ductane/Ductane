@@ -78,7 +78,7 @@ public final class SkyPass {
         clear.usage = .shaderRead
         clear.storageMode = .shared
         guard let none = device.makeTexture(descriptor: clear) else { throw FrameRendererError.couldNotCreate("sky clouds") }
-        let open: [Float16] = [0, 0, 0, 1]
+        let open: [UInt16] = [0, 0, 0, EnvironmentMap.halfBits(1)]
         open.withUnsafeBytes { none.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: $0.baseAddress!,
                                             bytesPerRow: 8) }
         noClouds = none

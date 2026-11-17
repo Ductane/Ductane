@@ -166,7 +166,7 @@ public nonisolated struct CloudLayer: Sendable, Equatable {
         descriptor.storageMode = .shared
         guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
         texture.label = "Cloud Coverage"
-        let halves = coverageMap.map { Float16($0) }
+        let halves = coverageMap.map { EnvironmentMap.halfBits($0) }
         halves.withUnsafeBytes {
             texture.replace(region: MTLRegionMake2D(0, 0, n, n), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: n * 2)
         }
