@@ -43,6 +43,10 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
     public var foliage: [Int: Foliage]
     /// **How each prop moves in the wind** (``Sway``), by index into ``props`` — only the props that move.
     public var sway: [Int: Sway]
+    /// **The props a scan finds** (``WaymarkScan``), by index into ``props``, each with the kind it is found as — a
+    /// vending machine, a supply crate, a door: every placement of the prop is outlined and labelled by that kind's icon
+    /// (``Waymark/Look/kinds``).
+    public var found: [Int: String]
     /// **The surfaces drawn as a liquid, coloured by how deep they are** — by prop and the material it replaces.
     public var liquids: [Liquid]
     /// **The props that are characters with a skeleton** — a figure made in a character tool and stood in the scene — by
@@ -75,7 +79,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
     public var weather: Weather?
 
     public init(name: String, props: [String], walkedThrough: [Int] = [], collisionShapes: [Int: String] = [:],
-                foliage: [Int: Foliage] = [:], sway: [Int: Sway] = [:], liquids: [Liquid] = [], characters: [Int] = [], effectMeshes: [String: Int] = [:], grime: [Grime] = [],
+                foliage: [Int: Foliage] = [:], sway: [Int: Sway] = [:], found: [Int: String] = [:], liquids: [Liquid] = [], characters: [Int] = [], effectMeshes: [String: Int] = [:], grime: [Grime] = [],
                 placements: [Placement], ground: Ground? = nil, sky: Sky = Sky(), lights: [Light] = [],
                 waters: [Water] = [], streams: [Stream] = [], effects: [Effect] = [], markers: [Marker] = [],
                 boundary: WorldBoundary? = nil, waymark: Waymark.Look? = nil, sounds: Sounds? = nil,
@@ -86,6 +90,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         self.collisionShapes = collisionShapes
         self.foliage = foliage
         self.sway = sway
+        self.found = found
         self.liquids = liquids
         self.characters = characters
         self.effectMeshes = effectMeshes
@@ -115,6 +120,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         collisionShapes = try c.decodeIfPresent([Int: String].self, forKey: .collisionShapes) ?? [:]
         foliage = ((try? c.decodeIfPresent([Int: Foliage].self, forKey: .foliage)) ?? nil) ?? [:]
         sway = ((try? c.decodeIfPresent([Int: Sway].self, forKey: .sway)) ?? nil) ?? [:]
+        found = ((try? c.decodeIfPresent([Int: String].self, forKey: .found)) ?? nil) ?? [:]
         liquids = try c.decodeIfPresent([Liquid].self, forKey: .liquids) ?? []
         characters = try c.decodeIfPresent([Int].self, forKey: .characters) ?? []
         effectMeshes = try c.decodeIfPresent([String: Int].self, forKey: .effectMeshes) ?? [:]
@@ -134,7 +140,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case version, name, props, walkedThrough, collisionShapes, foliage, sway, liquids, characters, effectMeshes, grime, placements,
+        case version, name, props, walkedThrough, collisionShapes, foliage, sway, found, liquids, characters, effectMeshes, grime, placements,
              ground, sky, lights, waters, streams, effects, markers, boundary, waymark, sounds,
              weather
     }
@@ -659,7 +665,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         }
         let named = file.placements.flatMap { $0.materials.values.map(\.prop) } + file.characters + Array(file.effectMeshes.values)
             + file.liquids.map(\.prop) + file.grime.map(\.prop) + Array(file.collisionShapes.keys) + file.walkedThrough
-            + Array(file.foliage.keys) + Array(file.sway.keys)
+            + Array(file.foliage.keys) + Array(file.sway.keys) + Array(file.found.keys)
         if let bad = named.first(where: { !file.props.indices.contains($0) }) { throw ReadError.badProp(bad) }
         if let ground = file.ground, !Ground.resolutions.contains(ground.resolution) {
             throw ReadError.badGround(ground.resolution)

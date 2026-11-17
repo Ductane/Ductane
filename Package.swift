@@ -87,7 +87,7 @@ let package = Package(
             // package but cannot exercise anything needing a GPU.
             resources: [.copy("HUDShaders.metal"), .copy("ToneMapShaders.metal"), .copy("SkyShaders.metal"),
                         .copy("ParticleShaders.metal"), .copy("DecalShaders.metal"), .copy("SkinningShaders.metal"),
-                        .copy("BoundaryShaders.metal"), .copy("WaymarkShaders.metal"),
+                        .copy("BoundaryShaders.metal"), .copy("WaymarkShaders.metal"), .copy("WaymarkScanShaders.metal"),
                         .copy("WeatherShaders.metal"), .copy("FogShaders.metal"), .copy("WorldShaders.metal"),
                         // **What a game's own shaders include** (`#include "DuctaneWeather.h"`, this folder on the Metal
                         // compiler's header search path): what the weather does to its surfaces. Copied into the bundle as

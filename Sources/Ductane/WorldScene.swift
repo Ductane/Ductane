@@ -121,6 +121,12 @@ public nonisolated struct WorldScene: Equatable, Sendable {
     /// which lists every prop the season or the wind moves.
     public var guessesByName: Bool
 
+    /// **What a scan finds** (``WaymarkScan``): each prop it finds, by file, with the kind it is found as — every
+    /// placement and scattered copy of it.
+    public var found: [URL: String]
+    /// **The world's markers**, for a scan to find those of a kind it is told to (``Waymark/Look/Kind/markers``).
+    public var markers: [WorldFile.Marker]
+
     /// **The meshes effects throw** — a frog, a bubble — by the name a recipe gives (``ParticleRecipe/mesh``): a prop
     /// file placed nowhere, drawn per particle. A name not here is drawn as a disc.
     public var effectMeshes: [String: URL]
@@ -129,7 +135,8 @@ public nonisolated struct WorldScene: Equatable, Sendable {
                 groundGrain: Float = 0, weather: Weather = .clear, waters: [WorldFile.Water] = [],
                 streams: [WorldFile.Stream] = [], effects: [Effect] = [], lights: [Light] = [],
                 boundary: WorldBoundary? = nil, foliage: [URL: Foliage] = [:], sway: [URL: Sway] = [:],
-                guessesByName: Bool = false, effectMeshes: [String: URL] = [:]) {
+                guessesByName: Bool = false, effectMeshes: [String: URL] = [:], found: [URL: String] = [:],
+                markers: [WorldFile.Marker] = []) {
         self.placements = placements
         self.scatters = scatters
         self.sky = sky
@@ -144,6 +151,8 @@ public nonisolated struct WorldScene: Equatable, Sendable {
         self.sway = sway
         self.guessesByName = guessesByName
         self.effectMeshes = effectMeshes
+        self.found = found
+        self.markers = markers
     }
 
     /// Every file a placement or a scattered prototype wears a material from.
@@ -317,13 +326,16 @@ public nonisolated extension WorldScene {
         var foliage: [URL: Foliage] = [:], sway: [URL: Sway] = [:]
         for (prop, kind) in world.foliage where urls.indices.contains(prop) { foliage[urls[prop]] = kind }
         for (prop, kind) in world.sway where urls.indices.contains(prop) { sway[urls[prop]] = kind }
+        var found: [URL: String] = [:]
+        for (prop, kind) in world.found where urls.indices.contains(prop) { found[urls[prop]] = kind }
         self.init(placements: placements, scatters: scatters, sky: world.sky, weather: world.weather ?? .clear,
                   waters: world.waters, streams: world.streams, effects: effects,
                   lights: world.lights.map {
                       Light(position: WorldScene.vector($0.position), colour: WorldScene.vector($0.colour),
                             intensity: $0.intensity, reach: $0.reach)
                   },
-                  boundary: world.boundary, foliage: foliage, sway: sway, guessesByName: false, effectMeshes: meshes)
+                  boundary: world.boundary, foliage: foliage, sway: sway, guessesByName: false, effectMeshes: meshes,
+                  found: found, markers: world.markers)
     }
 
     /// Three numbers as a vector, `fallback` if there are not three.

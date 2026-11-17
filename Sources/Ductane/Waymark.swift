@@ -100,6 +100,13 @@ public nonisolated struct Waymark: Sendable, Equatable {
         public var sound: Sound
         /// How loud, 0…1.
         public var volume: Float
+        /// **The scan sent out with it** (``WaymarkScan``): a ring sweeping out from the player, what it passes outlined
+        /// and labelled for a few seconds.
+        public var scan: Scan
+        /// **What each kind of place looks like** — the path's colour leading to it, and the icon a scan labels it with —
+        /// by its name in lower case (``kind(_:)``). A game names the kind when it asks for a path or registers a thing to
+        /// be found; a kind not here takes the line's ``color`` and a diamond.
+        public var kinds: [String: Kind]
 
         /// **The beam**: a column of light from the place, seen over whatever stands between.
         public struct Beam: Sendable, Equatable, Codable {
@@ -150,7 +157,7 @@ public nonisolated struct Waymark: Sendable, Equatable {
                     intensity: Float = 2.2, width: Float = 0.14, spacing: Float = 1.5, roundness: Float = 1,
                     glow: Float = 0.6, flow: Float = 14, sweepSpeed: Float = 40, duration: Float = 15,
                     fadeOut: Float = 2, lift: Float = 0.15, turnsToFace: Bool = true, beam: Beam = Beam(),
-                    sound: Sound = .bell, volume: Float = 0.6) {
+                    sound: Sound = .bell, volume: Float = 0.6, scan: Scan = Scan(), kinds: [String: Kind] = Look.defaultKinds) {
             self.pattern = pattern
             self.placement = placement
             self.color = simd_max(color, .zero)
@@ -168,6 +175,8 @@ public nonisolated struct Waymark: Sendable, Equatable {
             self.beam = beam
             self.sound = sound
             self.volume = simd_clamp(volume, 0, 1)
+            self.scan = scan
+            self.kinds = Dictionary(kinds.map { ($0.key.lowercased(), $0.value) }, uniquingKeysWith: { a, _ in a })
         }
 
         public init(from decoder: Decoder) throws {
@@ -189,7 +198,9 @@ public nonisolated struct Waymark: Sendable, Equatable {
                       turnsToFace: (try? c.decodeIfPresent(Bool.self, forKey: .turnsToFace)) ?? d.turnsToFace,
                       beam: (try? c.decodeIfPresent(Beam.self, forKey: .beam)) ?? d.beam,
                       sound: (try? c.decodeIfPresent(Sound.self, forKey: .sound)) ?? d.sound,
-                      volume: (try? c.decodeIfPresent(Float.self, forKey: .volume)) ?? d.volume)
+                      volume: (try? c.decodeIfPresent(Float.self, forKey: .volume)) ?? d.volume,
+                      scan: (try? c.decodeIfPresent(Scan.self, forKey: .scan)) ?? d.scan,
+                      kinds: (try? c.decodeIfPresent([String: Kind].self, forKey: .kinds)) ?? d.kinds)
         }
     }
 
@@ -221,8 +232,11 @@ public nonisolated struct Waymark: Sendable, Equatable {
     ///     makes none.
     ///   - surface: the height of what the line lies over at a point across the ground — the ground, or water over it.
     ///     The line is never under it.
+    ///   - kind: what kind of place it leads to — the line takes that kind's colour (``Look/leading(to:)``). Nil, the
+    ///     look's own.
     public init(way: [SIMD3<Float>], target: SIMD3<Float>, facing: SIMD3<Float>? = nil,
-                surface: (SIMD2<Float>) -> Float, look: Look = Look()) {
+                surface: (SIMD2<Float>) -> Float, look: Look = Look(), kind: String? = nil) {
+        let look = look.leading(to: kind)
         self.look = look
         self.target = target
         var route = way

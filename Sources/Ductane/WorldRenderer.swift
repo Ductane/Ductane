@@ -578,6 +578,7 @@ public final class WorldRenderer: GameLoop {
             effects = try WorldEffectsPass(device: device, sampleCount: 1)
             boundaryRenderer = try BoundaryRenderer(device: device, sampleCount: 1)
             waymarkRenderer = try WaymarkRenderer(device: device, sampleCount: 1)
+            scanRenderer = try WaymarkScanRenderer(device: device, sampleCount: 1)
             weatherRenderer = try WeatherRenderer(device: device, sampleCount: 1)
             // ±64 m at 12.5 cm a texel: rain under eaves, and lying snow kept off what is under something far enough out.
             weatherCover = try WeatherCover(device: device, resolution: 1024, halfExtent: 64)
@@ -602,6 +603,7 @@ public final class WorldRenderer: GameLoop {
             engine.residencySet.addAllocations(effects.allocations)
             engine.residencySet.addAllocations(boundaryRenderer.allocations)
             engine.residencySet.addAllocations(waymarkRenderer.allocations)
+            engine.residencySet.addAllocations(scanRenderer.allocations)
             engine.residencySet.addAllocations(weatherRenderer.allocations)
             engine.residencySet.addAllocations(weatherCover.allocations)
             engine.residencySet.addAllocations(footprintGrid.allocations)
@@ -2174,6 +2176,126 @@ public final class WorldRenderer: GameLoop {
     /// over the scene until it is over.
     public var waymark: Waymark?
 
+    // MARK: The scan
+
+    /// **A scan sent out now** (``WaymarkScan``) — ``sendScan(from:look:)`` sends one, ``stepScan(deltaTime:)`` steps it;
+    /// drawn over the scene until it is over.
+    public private(set) var scan: WaymarkScan?
+    /// **A game's things a scan can find** (``Findables``): its loot, its enemies, other players — added, moved and
+    /// removed as they come and go. What the world tags (``WorldScene/found``, its markers of a kind the look finds) is
+    /// found as well, without being registered.
+    public var findables = Findables()
+    /// **Where distances are measured from** — the player; nil is where the view is.
+    public var scanViewer: SIMD3<Float>?
+    /// What the world itself tags, gathered when a scan is sent.
+    private var scanSceneFindables: [Findable] = []
+    /// The found things as they show this frame, worked out once in the pre-passes and drawn in the scene.
+    private var scanShown: [WaymarkScan.Shown] = []
+    private var scanMask: MTLTexture?
+    private var scanRenderer: WaymarkScanRenderer!
+
+    /// **Sends a scan out from `origin`**, in `look` — the world's (``WorldFile/waymark``) unless a game has its own. One
+    /// already out is replaced. Nothing is sent when the look's scan is off.
+    public func sendScan(from origin: SIMD3<Float>, look: Waymark.Look) {
+        guard look.scan.isOn else { scan = nil; return }
+        scan = WaymarkScan(from: origin, look: look)
+        scanSceneFindables = sceneFindables(look: look)
+    }
+
+    /// Steps the scan on, finding what its ring reaches; drops it once it is over.
+    public func stepScan(deltaTime: Float) {
+        guard var current = scan else { return }
+        current.step(deltaTime: deltaTime, findables: allFindables)
+        scan = current.isOver ? nil : current
+    }
+
+    /// Ends the scan at once.
+    public func endScan() { scan = nil; scanShown = [] }
+
+    private var allFindables: [Findable] { scanSceneFindables + findables.all }
+
+    /// **What the world tags to be found**: every placement and scattered copy of a prop in ``WorldScene/found``, outlined
+    /// as that prop, and its markers of every kind the look finds. Negative ids, never a game's.
+    public func sceneFindables(look: Waymark.Look) -> [Findable] {
+        var out: [Findable] = []
+        for (i, marker) in scene.markers.enumerated() where look.kind(marker.kind).markers {
+            out.append(Findable(id: Findable.ID(-1 - i), kind: marker.kind, position: marker.position, top: 1.5))
+        }
+        guard !scene.found.isEmpty else { return out }
+        var next = -1_000_000
+        func add(_ url: URL, _ kind: String, _ transform: simd_float4x4) {
+            out.append(Findable(id: Findable.ID(next), kind: kind, position: SIMD3(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z),
+                                top: Findables.top(of: props[url]?.bounds, transform: transform),
+                                outline: .prop(url, transform)))
+            next -= 1
+        }
+        for placement in scene.placements {
+            if let kind = scene.found[placement.prop] { add(placement.prop, kind, placement.transform) }
+        }
+        for scatter in scene.scatters {
+            for copy in scatter.copies where scatter.prototypes.indices.contains(copy.prototype) {
+                let url = scatter.prototypes[copy.prototype]
+                if let kind = scene.found[url] { add(url, kind, copy.transform) }
+            }
+        }
+        return out
+    }
+
+    /// The scan's mask made resident when the view's size makes one, and let go when it is retired.
+    private func watchScanMasks() {
+        scanRenderer.allocationsChanged = { [unowned self] added, removed in
+            if !added.isEmpty { engine.residencySet.addAllocations(added) }
+            for old in removed { engine.residencySet.removeAllocation(old) }
+            engine.commitResidency()
+        }
+    }
+
+    /// **The height a scan's ring runs over** at a point: the ground, or still water over it.
+    private func scanSurface(_ p: SIMD2<Float>) -> Float {
+        var height = groundHeight(x: p.x, z: p.y) ?? scan?.origin.y ?? 0
+        for water in scene.waters where water.level > height {
+            if water.rectangles.contains(where: { $0.count == 4 && p.x >= $0[0] && p.y >= $0[1] && p.x <= $0[2] && p.y <= $0[3] }) {
+                height = water.level
+            }
+        }
+        return height
+    }
+
+    /// **The scan's outlines, into their mask** — every shown thing with an outline, at full detail, whatever stands
+    /// in front of it.
+    private func encodeScanMask(into commandBuffer: MTL4CommandBuffer, viewProjection: simd_float4x4) {
+        scanMask = nil
+        guard let scan else { scanShown = []; return }
+        scanShown = scan.shown(allFindables, from: scanViewer ?? camera.eye)
+        var parts: [WaymarkScanRenderer.MaskPart] = []
+        for item in scanShown where item.outline > 0 {
+            switch item.findable.outline {
+            case .none:
+                continue
+            case .meshes(let draws):
+                parts += draws.map { WaymarkScanRenderer.MaskPart(draw: $0, opacity: item.outline) }
+            case .prop(let url, let transform):
+                guard let prop = props[url] else { continue }
+                for shown in prop.meshes(at: 0).meshes {
+                    guard let vertices = shown.loaded.mesh.vertexBuffers.first else { continue }
+                    let model = transform * shown.loaded.nodeTransform
+                    for submesh in shown.loaded.mesh.submeshes.indices where !shown.seeThrough[submesh] {
+                        let range = shown.indices(submesh: submesh, level: 0)
+                        parts.append(WaymarkScanRenderer.MaskPart(
+                            draw: Findable.MaskDraw(vertices: vertices.buffer.gpuAddress + UInt64(vertices.offset),
+                                                    stride: 32, indices: range.address, indexCount: range.count,
+                                                    indexType: range.type, transform: model),
+                            opacity: item.outline))
+                    }
+                }
+            }
+        }
+        let size = engine.sceneSize
+        if scanRenderer.allocationsChanged == nil { watchScanMasks() }
+        scanMask = scanRenderer.encodeMask(parts, viewProjection: viewProjection, width: size.width, height: size.height,
+                                           frameSlot: frameSlot, into: commandBuffer)
+    }
+
     public func viewportSizeChanged(width: Int, height: Int) {
         aspectRatio = Float(max(width, 1)) / Float(max(height, 1))
         viewportHeight = max(height, 1)
@@ -2391,6 +2513,12 @@ public final class WorldRenderer: GameLoop {
             waymarkRenderer.draw(waymark, into: encoder, frameSlot: frameSlot, viewProjection: viewProjection,
                                  camera: camera.eye, time: time,
                                  pixelAngle: camera.fieldOfView / Float(max(viewportHeight, 1)))
+        }
+        if let scan {
+            let size = engine.sceneSize
+            scanRenderer.draw(scan, shown: scanShown, surface: { [unowned self] in scanSurface($0) }, mask: scanMask,
+                              into: encoder, frameSlot: frameSlot, viewProjection: viewProjection, camera: camera.eye,
+                              viewportSize: SIMD2(Float(max(size.width, 1)), Float(max(size.height, 1))))
         }
     }
 
@@ -2668,6 +2796,11 @@ public final class WorldRenderer: GameLoop {
                 waymarkRenderer = try WaymarkRenderer(device: device, sampleCount: samples)
                 retired.append(([oldWaymark], oldWaymark.allocations, after))
                 engine.residencySet.addAllocations(waymarkRenderer.allocations)
+                let oldScan = scanRenderer!
+                scanRenderer = try WaymarkScanRenderer(device: device, sampleCount: samples)
+                retired.append(([oldScan], oldScan.allocations, after))
+                engine.residencySet.addAllocations(scanRenderer.allocations)
+                watchScanMasks()
                 let oldWeather = weatherRenderer!
                 weatherRenderer = try WeatherRenderer(device: device, sampleCount: samples)
                 retired.append(([oldWeather], oldWeather.allocations, after))
@@ -2843,6 +2976,7 @@ public final class WorldRenderer: GameLoop {
         frameLighting = light
         encodeClouds(into: commandBuffer, lighting: light)
         let viewProjection = self.viewProjection
+        encodeScanMask(into: commandBuffer, viewProjection: viewProjection)
         // **What is overhead, round the eye**, for rain and snow to keep out from under — drawn while they fall, and
         // whenever snow lies, which settles only on what is open to the sky.
         let weather = frameWeather
