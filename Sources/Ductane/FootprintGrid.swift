@@ -3,6 +3,7 @@
 //  Ductane
 //
 
+import Foundation
 import Metal
 import simd
 
@@ -122,24 +123,32 @@ public final class FootprintGrid {
             kept += 1
         }
         count = kept
-        // Cell after cell: how many each holds, where each starts, then the indices.
+        // Cell after cell: where each starts, then the indices. **Only the cells a print touches are worked through**;
+        // the runs of empty cells between them are filled at once. Walking all of the grid's cells every frame, with two
+        // arrays of them made and filled, cost a game's main thread 4 ms a frame in a Debug build for fifty prints.
         let words = cells.contents().advanced(by: slot * 4 * Self.cellWords)
             .bindMemory(to: UInt32.self, capacity: Self.cellWords)
         let offsets = Self.cellCount + 1
-        var perCell = [UInt32](repeating: 0, count: Self.cellCount)
-        for touch in touches { perCell[Int(touch.cell)] += 1 }
+        touches.sort { $0.cell < $1.cell }
         var running: UInt32 = 0
-        for c in 0..<Self.cellCount {
-            words[c] = running
-            running += perCell[c]
+        var nextCell = 0
+        func fill(upTo last: Int) {
+            guard last >= nextCell else { return }
+            var value = running
+            memset_pattern4(words.advanced(by: nextCell), &value, (last - nextCell + 1) * 4)
+            nextCell = last + 1
         }
-        words[Self.cellCount] = running
-        var next = [UInt32](repeating: 0, count: Self.cellCount)
-        for touch in touches {
-            let c = Int(touch.cell)
-            words[offsets + Int(words[c] + next[c])] = UInt32(touch.print)
-            next[c] += 1
+        var k = 0
+        while k < touches.count {
+            let cell = Int(touches[k].cell)
+            fill(upTo: cell)
+            while k < touches.count, Int(touches[k].cell) == cell {
+                words[offsets + Int(running)] = UInt32(touches[k].print)
+                running += 1
+                k += 1
+            }
         }
+        fill(upTo: Self.cellCount)
         return kept
     }
 

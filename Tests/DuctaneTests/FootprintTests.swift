@@ -114,4 +114,26 @@ struct FootprintTests {
         #expect(FootprintTrail.Shape.boot.press(at: SIMD2(0, 0)) > 0.5)
         #expect(FootprintTrail.Shape.boot.press(at: SIMD2(1.1, 0)) == 0)
     }
+
+    @Test("Many walkers crossing: every print is found, from the grid's first cells to its last, and nowhere between")
+    @MainActor
+    func crowded() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { return }
+        var trail = FootprintTrail()
+        // Walkers along rows and columns, some through the same cells, near the grid's corners as well as its middle.
+        for (n, start) in [SIMD3<Float>(-47, 0, -40), SIMD3(-20, 0, 10), SIMD3(-20.2, 0, 10), SIMD3(30, 0, 47)].enumerated() {
+            Self.walk(&trail, id: n, from: start, along: SIMD3(1, 0, 0), metres: 15)
+        }
+        Self.walk(&trail, id: 9, from: SIMD3(-13, 0, 40), along: SIMD3(0, 0, -1), metres: 60)
+        let grid = try FootprintGrid(device: device)
+        #expect(grid.update(frameSlot: 2, trail: trail, around: .zero) == trail.prints.count)
+        for p in trail.prints {
+            #expect(grid.press(at: SIMD3(p.position.x, 0, p.position.y), frameSlot: 2) > 0.5)
+        }
+        #expect(grid.press(at: SIMD3(5, 0, -30), frameSlot: 2) == 0)
+        #expect(grid.press(at: SIMD3(47.9, 0, -47.9), frameSlot: 2) == 0)
+        // Written again with none, nothing is found where they were.
+        grid.update(frameSlot: 2, trail: FootprintTrail(), around: .zero)
+        #expect(trail.prints.allSatisfy { grid.press(at: SIMD3($0.position.x, 0, $0.position.y), frameSlot: 2) == 0 })
+    }
 }
