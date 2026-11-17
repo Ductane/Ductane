@@ -445,6 +445,102 @@ struct ParticleOverLifeTests {
 @Suite("Drawing only what shows")
 struct DrawingOnlyWhatShowsTests {
 
+    /// A solid pass that covers the screen at one depth, and a second pass that only notes the solid depth it was handed.
+    private final class Plane: GameLoop {
+        let pipeline: MTLRenderPipelineState
+        let depthState: MTLDepthStencilState
+        var opaque: MTLTexture?
+        init(pipeline: MTLRenderPipelineState, depthState: MTLDepthStencilState) {
+            self.pipeline = pipeline
+            self.depthState = depthState
+        }
+        var wantsOpaqueTextures: Bool { true }
+        var wantsOpaqueColour: Bool { false }
+        func beginFrame() {}
+        func step(deltaTime: Float) {}
+        func viewportSizeChanged(width: Int, height: Int) {}
+        func encode(into encoder: MTL4RenderCommandEncoder, frameSlot: Int, interpolation: Float) {
+            encoder.setRenderPipelineState(pipeline)
+            encoder.setDepthStencilState(depthState)
+            encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
+        }
+        func encodeTransparent(into encoder: MTL4RenderCommandEncoder, opaque: OpaqueTextures, frameSlot: Int,
+                               interpolation: Float) {
+            self.opaque = opaque.depth
+        }
+    }
+
+    /// **The multisampled solid depth reaches the second pass** (2026-11-16). The engine resolves it with a pass of its
+    /// own: the attachment's `.storeAndMultisampleResolve` now and then never wrote the copy, which a world's soft
+    /// particles then read as nothing behind them. Each frame here is a new renderer's first, with new targets — the
+    /// frame that went wrong.
+    @Test("At four samples, the solid scene's depth is in the copy the second pass reads, on a renderer's first frame")
+    @MainActor
+    func multisampledDepthReachesTheSecondPass() throws {
+        guard let device = MTLCreateSystemDefaultDevice(), device.supportsFamily(.metal4),
+              device.supportsTextureSampleCount(4) else { return }
+        let library = try device.makeLibrary(source: """
+            #include <metal_stdlib>
+            using namespace metal;
+            struct Out { float4 position [[position]]; };
+            vertex Out plane(uint id [[vertex_id]]) {
+                const float2 uv = float2((id << 1) & 2, id & 2);
+                Out out; out.position = float4(uv * 2.0 - 1.0, 0.375, 1.0); return out;
+            }
+            fragment float4 grey(Out in [[stage_in]]) { return float4(0.5, 0.5, 0.5, 1); }
+            """, options: nil)
+        let vertex = MTL4LibraryFunctionDescriptor()
+        vertex.library = library
+        vertex.name = "plane"
+        let fragment = MTL4LibraryFunctionDescriptor()
+        fragment.library = library
+        fragment.name = "grey"
+        let descriptor = MTL4RenderPipelineDescriptor()
+        descriptor.vertexFunctionDescriptor = vertex
+        descriptor.fragmentFunctionDescriptor = fragment
+        descriptor.colorAttachments[0].pixelFormat = FrameRenderer.sceneColorPixelFormat
+        descriptor.rasterSampleCount = 4
+        let pipeline = try device.makeCompiler(descriptor: MTL4CompilerDescriptor()).makeRenderPipelineState(descriptor: descriptor)
+        let written = MTLDepthStencilDescriptor()
+        written.depthCompareFunction = .always
+        written.isDepthWriteEnabled = true
+        let depthState = try #require(device.makeDepthStencilState(descriptor: written))
+        let readback = try #require(device.makeCommandQueue())
+
+        for size in [64, 96, 130] {
+            let frame = try FrameRenderer(device: device)
+            frame.sampleCount = 4
+            #expect(frame.effectiveSampleCount == 4)
+            let game = Plane(pipeline: pipeline, depthState: depthState)   // held here: the engine keeps its game weakly
+            frame.game = game
+            let target = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: FrameRenderer.colorPixelFormat, width: size,
+                                                                  height: size, mipmapped: false)
+            target.usage = .renderTarget
+            target.storageMode = .shared
+            let output = try #require(device.makeTexture(descriptor: target))
+            frame.residencySet.addAllocation(output)
+            frame.commitResidency()
+            frame.render(into: output)
+
+            let opaque = try #require(game.opaque)
+            let bytes = opaque.width * opaque.height * 4
+            let buffer = try #require(device.makeBuffer(length: bytes, options: .storageModeShared))
+            let commands = try #require(readback.makeCommandBuffer())
+            let blit = try #require(commands.makeBlitCommandEncoder())
+            blit.copy(from: opaque, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(),
+                      sourceSize: MTLSize(width: opaque.width, height: opaque.height, depth: 1), to: buffer,
+                      destinationOffset: 0, destinationBytesPerRow: opaque.width * 4, destinationBytesPerImage: bytes,
+                      options: .depthFromDepthStencil)
+            blit.endEncoding()
+            commands.commit()
+            commands.waitUntilCompleted()
+            let depths = UnsafeBufferPointer(start: buffer.contents().bindMemory(to: Float.self, capacity: bytes / 4),
+                                             count: bytes / 4)
+            let wrong = depths.filter { $0 != 0.375 }.count
+            #expect(wrong == 0, "\(wrong) of \(depths.count) texels not the solid depth at \(size)², e.g. \(depths.first { $0 != 0.375 } ?? 0)")
+        }
+    }
+
     /// A game reading only the solid scene's depth: the second pass is handed it at the scene's size, and a single
     /// texel stands in for the colour nobody copied; a particle too faint to show draws nothing.
     private final class DepthOnly: GameLoop {

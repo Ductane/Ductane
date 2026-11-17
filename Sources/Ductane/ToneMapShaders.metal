@@ -37,6 +37,20 @@ vertex ToneMapVertexOut toneMapVertex(uint id [[vertex_id]])
     return out;
 }
 
+struct OpaqueDepthOut {
+    float depth [[depth(any)]];
+};
+
+/// **The solid scene's multisampled depth, resolved**: sample 0 of each pixel, as a `.sample0` attachment resolve
+/// would, written as the depth of `FrameRenderer`'s opaque copy. See `FrameRenderer.encodeOpaqueDepthResolve`.
+fragment OpaqueDepthOut opaqueDepthResolveFragment(ToneMapVertexOut in [[stage_in]],
+                                                   depth2d_ms<float> solid [[texture(0)]])
+{
+    OpaqueDepthOut out;
+    out.depth = solid.read(uint2(in.position.xy), 0);
+    return out;
+}
+
 static float3 reinhard(float3 x, float whitePoint)
 {
     const float w2 = max(whitePoint * whitePoint, 1e-6f);

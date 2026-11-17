@@ -216,6 +216,12 @@ public final class FrameRenderer {
     private var blankOpaqueColour: MTLTexture?
     private var opaqueDepthTexture: MTLTexture?
     private var toneMapPipeline: MTLRenderPipelineState?
+    /// **The solid scene's depth, resolved by a pass of the engine's own** when it is multisampled
+    /// (``encodeOpaqueDepthResolve(from:into:)``) — sample 0 of each pixel written as depth. Nil if it could not be built,
+    /// and then the attachment's own resolve is used.
+    private var opaqueDepthResolvePipeline: MTLRenderPipelineState?
+    private var opaqueDepthResolveState: MTLDepthStencilState?
+    private var opaqueDepthResolveTable: MTL4ArgumentTable?
     private let toneMapArgumentTable: MTL4ArgumentTable
     private let toneMapUniformBuffer: MTLBuffer
     /// Per frame in flight, because the GPU may still be reading last frame's exposure.
@@ -376,6 +382,23 @@ public final class FrameRenderer {
             descriptor.fragmentFunctionDescriptor = fragmentFunction
             descriptor.colorAttachments[0].pixelFormat = FrameRenderer.colorPixelFormat
             toneMapPipeline = try compiler.makeRenderPipelineState(descriptor: descriptor)
+
+            // The depth resolve: the same full-screen triangle, depth only.
+            let resolveFragment = MTL4LibraryFunctionDescriptor()
+            resolveFragment.library = library
+            resolveFragment.name = "opaqueDepthResolveFragment"
+            let resolve = MTL4RenderPipelineDescriptor()
+            resolve.label = "Opaque Depth Resolve"
+            resolve.vertexFunctionDescriptor = vertexFunction
+            resolve.fragmentFunctionDescriptor = resolveFragment
+            opaqueDepthResolvePipeline = try compiler.makeRenderPipelineState(descriptor: resolve)
+            let always = MTLDepthStencilDescriptor()
+            always.depthCompareFunction = .always
+            always.isDepthWriteEnabled = true
+            opaqueDepthResolveState = device.makeDepthStencilState(descriptor: always)
+            let resolveTable = MTL4ArgumentTableDescriptor()
+            resolveTable.maxTextureBindCount = 1    // 0: the multisampled depth
+            opaqueDepthResolveTable = try device.makeArgumentTable(descriptor: resolveTable)
         } catch {
             // **Not fatal, and the fallback is a black screen rather than a crash.** A machine that
             // cannot build this pipeline is one where nothing else will work either, and saying so
@@ -525,7 +548,9 @@ public final class FrameRenderer {
 
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: FrameRenderer.depthPixelFormat, width: width, height: height, mipmapped: false)
-        descriptor.usage = .renderTarget
+        // Read as well at more than one sample: the solid scene's depth is resolved from it by a shader
+        // (``encodeOpaqueDepthResolve(from:into:)``).
+        descriptor.usage = samples > 1 ? [.renderTarget, .shaderRead] : .renderTarget
         // **Private, not memoryless** (2026-10-25). Nothing reads depth after the pass, so memoryless — tile memory
         // only, nothing allocated — looked free. It is not, for a scene of unbounded size: when a pass submits more
         // geometry than the GPU's tiling memory holds, the GPU renders partially, storing every attachment to memory
@@ -622,14 +647,24 @@ public final class FrameRenderer {
         depthAttachment.clearDepth = FrameRenderer.reversedZClearDepth
         depthAttachment.storeAction = .dontCare
         let stencil = stencilAttachment(depth)
+        // **The depth is resolved by a pass of the engine's own, not by the attachment** (2026-11-16): an attachment's
+        // `.storeAndMultisampleResolve` into ``opaqueDepthTexture`` sometimes never wrote it — about one frame in ten
+        // drawn into a new target, the copy left as the texture was made (every texel `0x7fffffff`, a NaN) and the
+        // soft particles and liquids reading it as nothing behind them. No barrier, residency request or matching
+        // stencil resolve changed that; resolving with a shader after the pass did.
+        let resolvesItself = depth.sampleCount > 1 && opaqueDepthResolvePipeline != nil
         if twoPasses {
             // Kept for the second pass, and resolved into the opaque copies.
             ensureOpaqueTextures(like: scene, colour: game.wantsOpaqueColour)
             if depth.sampleCount > 1 {
                 passDescriptor.colorAttachments[0].storeAction = .storeAndMultisampleResolve
-                depthAttachment.resolveTexture = opaqueDepthTexture
-                depthAttachment.depthResolveFilter = .sample0
-                depthAttachment.storeAction = .storeAndMultisampleResolve
+                if !resolvesItself {
+                    depthAttachment.resolveTexture = opaqueDepthTexture
+                    depthAttachment.depthResolveFilter = .sample0
+                    depthAttachment.storeAction = .storeAndMultisampleResolve
+                } else {
+                    depthAttachment.storeAction = .store
+                }
             } else {
                 depthAttachment.storeAction = .store
             }
@@ -655,6 +690,8 @@ public final class FrameRenderer {
         guard twoPasses, let opaqueDepth = opaqueDepthTexture else { return true }
         let wantsColour = game.wantsOpaqueColour
         guard let opaqueColour = wantsColour ? opaqueColourTexture : blankOpaqueColour else { return true }
+
+        if resolvesItself, !encodeOpaqueDepthResolve(from: depth, into: opaqueDepth) { return false }
 
         // **The copies**: the resolved colour when the game reads it, and — at one sample, where no resolve made it — the
         // depth.
@@ -685,6 +722,37 @@ public final class FrameRenderer {
         game.encodeTransparent(into: over, opaque: OpaqueTextures(colour: opaqueColour, depth: opaqueDepth),
                                frameSlot: frameSlot, interpolation: interpolation)
         over.endEncoding()
+        return true
+    }
+
+    /// **The solid scene's multisampled depth into ``opaqueDepthTexture``**: sample 0 of each pixel, as the attachment's
+    /// `.sample0` resolve would — written as depth by a full-screen triangle, after a barrier on the solid pass. False when
+    /// an encoder could not be made.
+    private func encodeOpaqueDepthResolve(from depth: MTLTexture, into opaqueDepth: MTLTexture) -> Bool {
+        guard let pipeline = opaqueDepthResolvePipeline, let state = opaqueDepthResolveState,
+              let table = opaqueDepthResolveTable else { return true }
+        let descriptor = MTL4RenderPassDescriptor()
+        let target = MTLRenderPassDepthAttachmentDescriptor()
+        target.texture = opaqueDepth
+        target.loadAction = .dontCare
+        target.storeAction = .store
+        descriptor.depthAttachment = target
+        // The format carries a stencil, so the pass has it too; nothing reads it.
+        let stencil = MTLRenderPassStencilAttachmentDescriptor()
+        stencil.texture = opaqueDepth
+        stencil.loadAction = .dontCare
+        stencil.storeAction = .dontCare
+        descriptor.stencilAttachment = stencil
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return false }
+        encoder.label = "Opaque depth"
+        // The solid pass stored the depth read here.
+        encoder.barrier(afterQueueStages: .fragment, beforeStages: .fragment, visibilityOptions: .device)
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setDepthStencilState(state)
+        encoder.setArgumentTable(table, stages: .fragment)
+        table.setTexture(depth.gpuResourceID, index: 0)
+        encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
         return true
     }
 
