@@ -445,19 +445,43 @@ public final class WorldRenderer: GameLoop {
 
     // MARK: GPU state
 
-    private var propPipeline: MTLRenderPipelineState
-    private var groundPipeline: MTLRenderPipelineState
-    private var instancedPipeline: MTLRenderPipelineState
+    /// **The surfaces' pipelines, twice** (2026-11-16): with the weather on surfaces compiled in, and without
+    /// (`weatherOnSurfaces`, function constant 0 in `WorldShaders.metal`). A frame whose weather lays nothing
+    /// (``WeatherSurface/laysOnSurfaces``) draws with the plain set: compiled in and doing nothing, the weather took
+    /// a wooded 400 m scene's meadow from 24 to 38 ms of GPU on a clear day.
+    ///
+    /// **And the seasons on foliage likewise** (function constant 1): leaves turning and falling compiled in only while a
+    /// calendar changes foliage (``frameFall``) — 5 ms of a wooded scene's meadow with no calendar. Four sets, by
+    /// ``SurfacePipelines/index(weather:seasons:)``.
+    private var surfaceSets: [SurfacePipelines]
+    /// Whether the frame being drawn lays weather on surfaces, and changes foliage by the season — set as its uniforms are
+    /// written.
+    ///
+    /// **The ground and what stands on it are asked apart** (``WeatherSurface/laysOnSurfaces``, ``WeatherSurface/laysOnProps``):
+    /// footprints, puddles and fallen leaves lie on the ground alone, so a walk leaving prints on a clear day draws only the
+    /// ground with the weather compiled in.
+    private var drawsWeatherOnGround = true
+    private var drawsWeatherOnProps = true
+    private var drawsSeasonsOnFoliage = true
+    private var surfaces: SurfacePipelines {
+        surfaceSets[SurfacePipelines.index(weather: drawsWeatherOnProps, seasons: drawsSeasonsOnFoliage)]
+    }
+    private var propPipeline: MTLRenderPipelineState { surfaces.prop }
+    private var groundPipeline: MTLRenderPipelineState {
+        surfaceSets[SurfacePipelines.index(weather: drawsWeatherOnGround, seasons: drawsSeasonsOnFoliage)].ground
+    }
+    private var instancedPipeline: MTLRenderPipelineState { surfaces.instanced }
     /// Snow built up on props (Ductane's `SnowCap`), drawn with their copies.
     private var snowCapPipeline: MTLRenderPipelineState
     /// See-through props — glass — blended over the finished solid scene (``preparedSeeThrough``).
-    private var seeThroughPipeline: MTLRenderPipelineState
+    private var seeThroughPipeline: MTLRenderPipelineState { surfaces.seeThrough }
     /// Liquids — the goop — blended over the solid scene, reading its depth (``WorldFile/Liquid``).
     private var liquidPipeline: MTLRenderPipelineState
     /// Particles drawn as pack meshes — frogs, bubbles, flies — lit as props are (``encodeEffectMeshes(into:)``).
-    private var effectMeshPipeline: MTLRenderPipelineState
-    /// Far pictures, drawn as squares facing the eye (``Impostor``) — and baked, into their own targets.
-    private var impostorPipeline: MTLRenderPipelineState
+    private var effectMeshPipeline: MTLRenderPipelineState { surfaces.effectMesh }
+    /// Far pictures, drawn as squares facing the eye (``Impostor``).
+    private var impostorPipeline: MTLRenderPipelineState { surfaces.impostor }
+    /// Far pictures baked, into their own targets.
     private let impostorBakePipeline: MTLRenderPipelineState
     private let impostorBakeDepthState: MTLDepthStencilState
     private let shadowPropPipeline: MTLRenderPipelineState
@@ -528,10 +552,13 @@ public final class WorldRenderer: GameLoop {
             }
             func pipeline(_ label: String, _ vertex: String, _ fragment: String,
                           _ vertexDescriptor: MTLVertexDescriptor?,
-                          format: MTLPixelFormat = FrameRenderer.sceneColorPixelFormat) throws -> MTLRenderPipelineState {
+                          format: MTLPixelFormat = FrameRenderer.sceneColorPixelFormat,
+                          surfaceVertex: Bool = false) throws -> MTLRenderPipelineState {
                 let d = MTL4RenderPipelineDescriptor()
                 d.label = label
-                d.vertexFunctionDescriptor = function(vertex)
+                // A surface's vertex function takes the function constants (``SurfacePipelines``): compiled in, as drawn.
+                d.vertexFunctionDescriptor = surfaceVertex
+                    ? Self.surfaceFunction(vertex, library: library, weather: true, seasons: true) : function(vertex)
                 d.fragmentFunctionDescriptor = function(fragment)
                 d.vertexDescriptor = vertexDescriptor
                 d.colorAttachments[0].pixelFormat = format
@@ -540,14 +567,9 @@ public final class WorldRenderer: GameLoop {
             // The scene goes into the engine's HDR target, which it tone maps afterwards — at the engine's sample count,
             // rebuilt when the viewport's anti-aliasing changes (``applyGraphics``).
             let scenePipelines = try Self.buildScenePipelines(device: device, library: library, sampleCount: 1)
-            propPipeline = scenePipelines.prop
-            groundPipeline = scenePipelines.ground
-            instancedPipeline = scenePipelines.instanced
+            surfaceSets = scenePipelines.surfaceSets
             snowCapPipeline = scenePipelines.snowCap
-            seeThroughPipeline = scenePipelines.seeThrough
             liquidPipeline = scenePipelines.liquid
-            effectMeshPipeline = scenePipelines.effectMesh
-            impostorPipeline = scenePipelines.impostor
             gridPipeline = scenePipelines.grid
             waterPipeline = scenePipelines.water
             streamPipeline = scenePipelines.stream
@@ -584,7 +606,7 @@ public final class WorldRenderer: GameLoop {
             engine.residencySet.addAllocations(weatherCover.allocations)
             engine.residencySet.addAllocations(footprintGrid.allocations)
             silhouettePipeline = try pipeline("Silhouette", "propVertex", "silhouetteFragment",
-                                                 Self.vertexDescriptor(), format: .r8Unorm)
+                                                 Self.vertexDescriptor(), format: .r8Unorm, surfaceVertex: true)
             // **A far picture's bake**: colour and normal into a slice a view, the view chosen per instance (layered).
             let bake = MTL4RenderPipelineDescriptor()
             bake.label = "Far Picture Bake"
@@ -2481,10 +2503,38 @@ public final class WorldRenderer: GameLoop {
     /// **Every pipeline that draws into the scene pass**, built for one sample count — all must match the engine's
     /// (``FrameRenderer/sampleCount``). Props and scattered copies **turn a cut-out edge into coverage** when
     /// multisampled (alpha to coverage; `propFragment` hands over the edge), so leaves and grass are smoothed too.
+    /// The pipelines that draw surfaces with `propFragment` — built once with the weather on surfaces compiled in and once
+    /// without (``fullSurfaces``, ``plainSurfaces``).
+    private struct SurfacePipelines {
+        let prop, ground, instanced, seeThrough, effectMesh, impostor: MTLRenderPipelineState
+        var all: [AnyObject] { [prop, ground, instanced, seeThrough, effectMesh, impostor] }
+        /// Where the set with or without the weather on surfaces and the seasons on foliage is kept.
+        static func index(weather: Bool, seasons: Bool) -> Int { (weather ? 1 : 0) + (seasons ? 2 : 0) }
+    }
+
     private struct ScenePipelines {
-        let prop, ground, instanced, snowCap, seeThrough, liquid, effectMesh, impostor, grid, water, stream: MTLRenderPipelineState
+        /// By ``SurfacePipelines/index(weather:seasons:)``.
+        let surfaceSets: [SurfacePipelines]
+        let snowCap, liquid, grid, water, stream: MTLRenderPipelineState
         let fogSky: FogSkyPass
         let sky: SkyPass
+    }
+
+    /// **A surface function with the weather on surfaces (constant 0) and the seasons on foliage (constant 1) compiled in
+    /// or out** — every function that reads them must be made with both set (``SurfacePipelines``).
+    private static func surfaceFunction(_ name: String, library: MTLLibrary, weather: Bool, seasons: Bool) -> MTL4FunctionDescriptor {
+        let base = MTL4LibraryFunctionDescriptor()
+        base.library = library
+        base.name = name
+        let values = MTLFunctionConstantValues()
+        var weather = weather, seasons = seasons
+        values.setConstantValue(&weather, type: .bool, index: 0)
+        values.setConstantValue(&seasons, type: .bool, index: 1)
+        let specialized = MTL4SpecializedFunctionDescriptor()
+        specialized.functionDescriptor = base
+        specialized.constantValues = values
+        specialized.specializedName = name + (weather ? "Weather" : "") + (seasons ? "Seasons" : "") + "Specialized"
+        return specialized
     }
 
     private static func buildScenePipelines(device: MTLDevice, library: MTLLibrary, sampleCount: Int) throws -> ScenePipelines {
@@ -2495,12 +2545,18 @@ public final class WorldRenderer: GameLoop {
             f.name = name
             return f
         }
+        /// A surface function with the weather on surfaces (constant 0) and the seasons on foliage (constant 1) compiled
+        /// in or out.
+        func function(_ name: String, compiled: (weather: Bool, seasons: Bool)?) -> MTL4FunctionDescriptor {
+            guard let compiled else { return function(name) }
+            return surfaceFunction(name, library: library, weather: compiled.weather, seasons: compiled.seasons)
+        }
         func pipeline(_ label: String, _ vertex: String, _ fragment: String, _ vertexDescriptor: MTLVertexDescriptor?,
-                      coverage: Bool = false) throws -> MTLRenderPipelineState {
+                      coverage: Bool = false, compiled: (weather: Bool, seasons: Bool)? = nil) throws -> MTLRenderPipelineState {
             let d = MTL4RenderPipelineDescriptor()
             d.label = label
-            d.vertexFunctionDescriptor = function(vertex)
-            d.fragmentFunctionDescriptor = function(fragment)
+            d.vertexFunctionDescriptor = function(vertex, compiled: compiled)
+            d.fragmentFunctionDescriptor = function(fragment, compiled: compiled)
             d.vertexDescriptor = vertexDescriptor
             d.colorAttachments[0].pixelFormat = FrameRenderer.sceneColorPixelFormat
             d.rasterSampleCount = sampleCount
@@ -2525,25 +2581,41 @@ public final class WorldRenderer: GameLoop {
         stream.vertexFunctionDescriptor = function("streamVertex")
         stream.fragmentFunctionDescriptor = function("streamFragment")
         // Glass blends as water does, with the props' own shading (`propFragment` hands over its opacity).
-        let seeThrough = water.copy() as! MTL4RenderPipelineDescriptor
-        seeThrough.label = "See-through Props"
-        seeThrough.vertexFunctionDescriptor = function("propInstancedVertex")
-        seeThrough.fragmentFunctionDescriptor = function("propFragment")
-        seeThrough.vertexDescriptor = Self.vertexDescriptor()
+        func seeThrough(_ compiled: (weather: Bool, seasons: Bool), label: String) -> MTL4RenderPipelineDescriptor {
+            let d = water.copy() as! MTL4RenderPipelineDescriptor
+            d.label = "See-through Props" + label
+            d.vertexFunctionDescriptor = function("propInstancedVertex", compiled: compiled)
+            d.fragmentFunctionDescriptor = function("propFragment", compiled: compiled)
+            d.vertexDescriptor = Self.vertexDescriptor()
+            return d
+        }
         // A liquid blends the same way, in its own shading (``WorldFile/Liquid``).
-        let liquid = seeThrough.copy() as! MTL4RenderPipelineDescriptor
+        let liquid = seeThrough((true, true), label: "")
         liquid.label = "Liquids"
         liquid.fragmentFunctionDescriptor = function("liquidFragment")
+        func surfaces(weather: Bool, seasons: Bool) throws -> SurfacePipelines {
+            let compiled = (weather: weather, seasons: seasons)
+            let label = (weather ? "" : ", no weather") + (seasons ? "" : ", no seasons")
+            return SurfacePipelines(
+                prop: try pipeline("Prop" + label, "propVertex", "propFragment", Self.vertexDescriptor(), coverage: true,
+                                   compiled: compiled),
+                ground: try pipeline("Ground" + label, "groundVertex", "propFragment", Self.groundVertexDescriptor(),
+                                     compiled: compiled),
+                instanced: try pipeline("Scattered Props" + label, "propInstancedVertex", "propFragment",
+                                        Self.vertexDescriptor(), coverage: true, compiled: compiled),
+                seeThrough: try compiler.makeRenderPipelineState(descriptor: seeThrough(compiled, label: label),
+                                                                 compilerTaskOptions: nil),
+                effectMesh: try pipeline("Effect Meshes" + label, "effectMeshVertex", "propFragment", Self.vertexDescriptor(),
+                                         coverage: true, compiled: compiled),
+                impostor: try pipeline("Far Pictures" + label, "impostorVertex", "impostorFragment", nil, coverage: true,
+                                       compiled: compiled))
+        }
+        // In ``SurfacePipelines/index(weather:seasons:)`` order.
+        let sets = try [(false, false), (true, false), (false, true), (true, true)].map { try surfaces(weather: $0.0, seasons: $0.1) }
         return ScenePipelines(
-            prop: try pipeline("Prop", "propVertex", "propFragment", Self.vertexDescriptor(), coverage: true),
-            ground: try pipeline("Ground", "groundVertex", "propFragment", Self.groundVertexDescriptor()),
-            instanced: try pipeline("Scattered Props", "propInstancedVertex", "propFragment", Self.vertexDescriptor(),
-                                    coverage: true),
+            surfaceSets: sets,
             snowCap: try pipeline("Snow Caps", "snowCapVertex", "snowCapFragment", Self.vertexDescriptor()),
-            seeThrough: try compiler.makeRenderPipelineState(descriptor: seeThrough, compilerTaskOptions: nil),
             liquid: try compiler.makeRenderPipelineState(descriptor: liquid, compilerTaskOptions: nil),
-            effectMesh: try pipeline("Effect Meshes", "effectMeshVertex", "propFragment", Self.vertexDescriptor(), coverage: true),
-            impostor: try pipeline("Far Pictures", "impostorVertex", "impostorFragment", nil, coverage: true),
             grid: try pipeline("Grid", "gridVertex", "gridFragment", nil),
             water: try compiler.makeRenderPipelineState(descriptor: water, compilerTaskOptions: nil),
             stream: try compiler.makeRenderPipelineState(descriptor: stream, compilerTaskOptions: nil),
@@ -2574,17 +2646,11 @@ public final class WorldRenderer: GameLoop {
         if samples != samplesBefore {
             do {
                 let rebuilt = try Self.buildScenePipelines(device: device, library: library, sampleCount: samples)
-                retired.append(([propPipeline, groundPipeline, instancedPipeline, snowCapPipeline, seeThroughPipeline, liquidPipeline,
-                                 effectMeshPipeline, impostorPipeline,
+                retired.append((surfaceSets.flatMap(\.all) + [snowCapPipeline, liquidPipeline,
                                  gridPipeline, waterPipeline, streamPipeline, fogSkyPass, skyPass], skyPass.allocations, after))
-                propPipeline = rebuilt.prop
-                groundPipeline = rebuilt.ground
-                instancedPipeline = rebuilt.instanced
+                surfaceSets = rebuilt.surfaceSets
                 snowCapPipeline = rebuilt.snowCap
-                seeThroughPipeline = rebuilt.seeThrough
                 liquidPipeline = rebuilt.liquid
-                effectMeshPipeline = rebuilt.effectMesh
-                impostorPipeline = rebuilt.impostor
                 gridPipeline = rebuilt.grid
                 waterPipeline = rebuilt.water
                 streamPipeline = rebuilt.stream
@@ -3683,6 +3749,10 @@ public final class WorldRenderer: GameLoop {
                 weather: frameWeather, snowDepth: graphics.snowDepth, cover: weatherCover, coverDrawn: covering,
                 footprints: footprintGrid, printsDrawn: footprintsDrawn, time: weatherTime, clouds: frameClouds?.layer,
                 fall: frameFall.map { (colors: $0.fall, phase: $0.phase) }, litterBound: litterFieldBuffer != nil))
+        // The surfaces drawn with the weather compiled in only when it lays something on them (``surfaces``).
+        drawsWeatherOnGround = frame.weather.laysOnSurfaces
+        drawsWeatherOnProps = frame.weather.laysOnProps
+        drawsSeasonsOnFoliage = frameFall.map { FallColors.changesAnything(phase: $0.phase) } ?? false
         let slot = frameBuffer.contents().advanced(by: frameSlot * Self.frameStride)
         slot.copyMemory(from: &frame, byteCount: MemoryLayout<FrameUniforms>.stride)
         // The lights nearest the view — the orbit's target when looking down, the walker's eye when walking.

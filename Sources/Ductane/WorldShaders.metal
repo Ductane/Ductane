@@ -46,6 +46,29 @@ struct FrameUniforms {
 };
 
 
+/// **Whether the weather on surfaces is compiled in** (function constant 0; ``WorldRenderer``'s two sets of surface
+/// pipelines). Snow lying, dust, wet ground and puddles, footprints and fallen leaves (`duWeathered`), and snow raising the
+/// ground, are a large part of the surface shaders, and **present in a shader they cost a frame whether or not they draw
+/// anything**: a GPU keeps fewer pixels in flight for a shader that might need all of it. A wooded 400 m scene's meadow
+/// on a clear day went from 16 to 38 ms of GPU as they were added (2026-11-16, measured build by build). So the surfaces are
+/// drawn by a set compiled without them whenever the frame's weather lays nothing (``WeatherSurface/laysOnSurfaces``),
+/// and by this full set the moment it does. Undefined — a library used without specializing — means compiled in.
+constant bool weatherOnSurfacesConstant [[function_constant(0)]];
+constant bool weatherOnSurfaces = is_function_constant_defined(weatherOnSurfacesConstant) ? weatherOnSurfacesConstant : true;
+/// **Whether the seasons on foliage are compiled in** (function constant 1): leaves turning, thinning and falling, grass
+/// going straw (`duSeasonOf`, `duThroughTheYear`, `duShed`) — compiled in only while a scene's calendar is changing its
+/// foliage. In and doing nothing, they cost a wooded scene's meadow with no calendar about 5 ms of GPU a frame.
+constant bool seasonsOnFoliageConstant [[function_constant(1)]];
+constant bool seasonsOnFoliage = is_function_constant_defined(seasonsOnFoliageConstant) ? seasonsOnFoliageConstant : true;
+
+/// The season of a copy standing at `root` (`duSeasonOf`) — none where the seasons are compiled out.
+static inline void seasonOf(float2 root, float4 foliage, constant DUWeatherSurface &weather, thread float4 &colour,
+                            thread float &leaves) {
+    colour = float4(0);
+    leaves = 1;
+    if (seasonsOnFoliage) duSeasonOf(root, foliage, weather, colour, leaves);
+}
+
 /// **How much of the sky's light reaches a point, 0…1: none deep under the ground.** A cave's walls and roof are props
 /// under ground that runs over them, and lit by the open sky they glowed like daylight however dark the cave was meant
 /// to be. The ground over a point is read from the ground's own vertices — holes are drawn as nothing but keep their
@@ -214,8 +237,8 @@ vertex VertexOut propVertex(VertexIn in [[stage_in]],
     world.xyz = duSwayed(world.xyz, object.model[3].xyz, length(object.model[1].xyz), object.sway, object.wind, object.emissive.w > 0.5);
     VertexOut out;
     out.soft = 0;
-    duSeasonOf(object.model[3].xz, object.foliage, frame.weather, out.fallColour, out.fallLeaves);
-    out.position = object.emissive.w > 0.5 && duShed(world.xyz, out.fallLeaves) ? duFallenPosition : frame.viewProjection * world;
+    seasonOf(object.model[3].xz, object.foliage, frame.weather, out.fallColour, out.fallLeaves);
+    out.position = seasonsOnFoliage && object.emissive.w > 0.5 && duShed(world.xyz, out.fallLeaves) ? duFallenPosition : frame.viewProjection * world;
     out.worldPosition = world.xyz;
     out.normal = (object.normalMatrix * float4(in.normal, 0)).xyz;
     out.uv = in.uv;
@@ -238,8 +261,8 @@ vertex VertexOut propInstancedVertex(VertexIn in [[stage_in]],
     world.xyz = duSwayed(world.xyz, copies[instance][3].xyz, length(copies[instance][1].xyz), object.sway, object.wind, object.emissive.w > 0.5);
     VertexOut out;
     out.soft = 0;
-    duSeasonOf(copies[instance][3].xz, object.foliage, frame.weather, out.fallColour, out.fallLeaves);
-    out.position = object.emissive.w > 0.5 && duShed(world.xyz, out.fallLeaves) ? duFallenPosition : frame.viewProjection * world;
+    seasonOf(copies[instance][3].xz, object.foliage, frame.weather, out.fallColour, out.fallLeaves);
+    out.position = seasonsOnFoliage && object.emissive.w > 0.5 && duShed(world.xyz, out.fallLeaves) ? duFallenPosition : frame.viewProjection * world;
     out.worldPosition = world.xyz;
     float3 c0 = model[0].xyz, c1 = model[1].xyz, c2 = model[2].xyz;
     float3x3 cofactor = float3x3(cross(c1, c2), cross(c2, c0), cross(c0, c1));
@@ -338,7 +361,7 @@ vertex VertexOut groundVertex(GroundVertexIn in [[stage_in]],
     float4 world = object.model * float4(in.position, 1);
     // **Snow with depth raises the ground where it lies** (`frame.weather.snow.y`), as much as it whitens it there — less
     // where feet have trodden it down into a path.
-    if (frame.weather.snow.y > 0) {
+    if (weatherOnSurfaces && frame.weather.snow.y > 0) {
         float lying = duSnowOn(world.xyz, normalize((object.normalMatrix * float4(in.normal, 0)).xyz), frame.weather, snowCover);
         float down = lying > 0 ? duTrodden(float3(world.x, world.y + frame.weather.snow.y * lying, world.z), frame.weather, prints, cells) : 0;
         world.y += frame.weather.snow.y * lying * (1.0 - 0.7 * down);
@@ -566,12 +589,16 @@ fragment float4 propFragment(VertexOut in [[stage_in]],
     float3 albedo = object.baseColour.rgb * base.rgb * tint;
     if (grunge.params.w > 0.5) albedo = grimed(albedo, worldPosition, faceNormal, grunge, grungeMap, linear);
     // **Through the year** (fall colors): a turning tree's leaves coloured or fallen, grass gone straw.
-    if (!duThroughTheYear(albedo, base.a, worldPosition, in.fallColour, in.fallLeaves, object.params.z > 0, object.emissive.w > 0.5)) discard_fragment();
+    if (seasonsOnFoliage && !duThroughTheYear(albedo, base.a, worldPosition, in.fallColour, in.fallLeaves, object.params.z > 0, object.emissive.w > 0.5)) discard_fragment();
     // **The weather on it** (Ductane's `duWeathered`): fallen leaves on the ground under turning trees, lying snow
     // on what faces the sky, dust settled in a storm, wet surfaces, puddles and running water, footprints in snow and soft
     // ground.
-    DUWeathered weathered = duWeathered(albedo, n, faceNormal, worldPosition, object.params.w > 0.5, true, soft,
-                                        frame.weather, frame.ground, snowCover, prints, cells, puddles, litterField);
+    // Compiled out of the set a frame with no weather on surfaces draws with (`weatherOnSurfaces`).
+    DUWeathered weathered = { albedo, n, 0, 0, 0, 0, 0 };
+    if (weatherOnSurfaces) {
+        weathered = duWeathered(albedo, n, faceNormal, worldPosition, object.params.w > 0.5, true, soft,
+                                frame.weather, frame.ground, snowCover, prints, cells, puddles, litterField);
+    }
     albedo = weathered.albedo;
     n = weathered.normal;
 
@@ -943,7 +970,7 @@ vertex ImpostorOut impostorVertex(uint vid [[vertex_id]],
     out.forward = forward;
     out.radius = radius;
     out.root = copies[instance][3].xz;
-    duSeasonOf(out.root, object.foliage, frame.weather, out.fallColour, out.fallLeaves);
+    seasonOf(out.root, object.foliage, frame.weather, out.fallColour, out.fallLeaves);
     return out;
 }
 
@@ -1019,7 +1046,7 @@ fragment ImpostorPixel impostorFragment(ImpostorOut in [[stage_in]],
     float snowAmount = frame.weather.snow.x, open = snowAmount > 0 ? duSnowOpen(p, frame.weather, snowCover) : 0;
     float grain = open > 0 ? duSnowGrain(p) : 0;
     // Through the year, as the mesh: the picture's green turned or gone straw — the tree's numbers worked out once.
-    bool seasonal = in.fallColour.a > 0;
+    bool seasonal = seasonsOnFoliage && in.fallColour.a > 0;
 
     float tapped = 0;
     float3 litSum = 0, normalSum = 0, albedoSum = 0;
@@ -1047,7 +1074,7 @@ fragment ImpostorPixel impostorFragment(ImpostorOut in [[stage_in]],
         }
     }
     // A thinning tree's far picture loses its green in the same clumps as the mesh.
-    if (in.fallLeaves < 1.0 && duLeafness(albedoSum / max(tapped, 1e-4), false) > 0.3
+    if (seasonsOnFoliage && in.fallLeaves < 1.0 && duLeafness(albedoSum / max(tapped, 1e-4), false) > 0.3
         && duFallen(in.local * in.radius + float3(in.root.x, 0, in.root.y), in.fallLeaves)) discard_fragment();
     // The point lights once, from the taps' mean normal: a torch is rarely near a far tree.
     float3 n = length(normalSum) > 1e-4 ? normalize(normalSum) : v;

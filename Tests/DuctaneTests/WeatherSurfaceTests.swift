@@ -156,4 +156,36 @@ struct WeatherSurfaceTests {
         #expect(source.hasSuffix("kernel x"))
         #expect(ShaderLibrary.withEngineHeaders("#include <metal_stdlib>") == "#include <metal_stdlib>")
     }
+
+    @Test("A clear, dry day with no prints lays nothing on surfaces; each thing the weather lays says so")
+    func laysOnSurfaces() {
+        #expect(!WeatherSurface().laysOnSurfaces)
+        var clouded = WeatherSurface()
+        clouded.clouds = SIMD4(0.6, 0.4, 900, 600)
+        clouded.fogVolume = SIMD4(1, 0.5, 6, 64)
+        #expect(!clouded.laysOnSurfaces, "clouds' shadows and fog are drawn either way")
+        var surface = WeatherSurface()
+        surface.snow.x = 0.3
+        #expect(surface.laysOnSurfaces, "lying snow")
+        #expect(surface.laysOnProps, "snow lies on props too")
+        surface = WeatherSurface()
+        surface.printGrid.x = 1
+        #expect(surface.laysOnSurfaces, "footprints")
+        #expect(!surface.laysOnProps, "a print on a prop needs snow on it")
+        surface = WeatherSurface()
+        surface.wet.y = 0.5
+        #expect(surface.laysOnSurfaces, "puddles")
+        #expect(!surface.laysOnProps, "puddles lie on the ground")
+        surface.wet.x = 0.5
+        #expect(surface.laysOnProps, "wet surfaces")
+        surface = WeatherSurface()
+        surface.fallLitter = SIMD4(0.4, 1, 0, 0)
+        #expect(surface.laysOnSurfaces, "fallen leaves")
+        #expect(!surface.laysOnProps, "fallen leaves lie on the ground")
+        surface.fallLitter.y = 0
+        #expect(!surface.laysOnSurfaces, "leaves with no field bound lie nowhere")
+        surface = WeatherSurface()
+        surface.dust.w = 0.2
+        #expect(surface.laysOnSurfaces && surface.laysOnProps, "settled dust")
+    }
 }

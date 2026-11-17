@@ -43,6 +43,23 @@ public nonisolated struct WeatherSurface: Sendable, Equatable {
     /// No weather: nothing lies, nothing is wet, no clouds, no fog volume — what a clear day draws.
     public init() {}
 
+    /// **Whether the weather lays anything on surfaces** — lying snow, footprints, wet ground or puddles, fallen leaves
+    /// on the ground, settled dust: what `duWeathered` in `DuctaneWeather.h` would change. False on a clear, dry day with
+    /// no prints, when a renderer can draw its surfaces with shaders compiled without it, which cost far less (a wooded
+    /// 400 m scene's meadow, 38 ms of GPU with it compiled in and doing nothing, 24 without; ``WorldRenderer`` does this). The
+    /// clouds' shadows, the fog and swaying are not in it: they are drawn either way.
+    public var laysOnSurfaces: Bool {
+        laysOnProps || printGrid.x >= 0.5 || wet.y > 0 || (fallLitter.y > 0.5 && fallLitter.x > 0)
+    }
+
+    /// **Whether the weather lays anything on what stands on the ground** — lying snow, wet surfaces and running water,
+    /// settled dust. Footprints, puddles and fallen leaves lie on the ground alone (a print on a prop needs snow on it), so a
+    /// walk leaving prints on a clear day changes only the ground's shader (``WorldRenderer``): with every prop switched to
+    /// the full one, a wooded scene's meadow went from 18 to 30 ms of GPU as soon as a walker took a step on soft ground.
+    public var laysOnProps: Bool {
+        snow.x > 0 || wet.x > 0 || wet.z > 0 || dust.w > 0
+    }
+
     /// **The weather on a frame's surfaces.**
     ///
     /// - Parameters:
