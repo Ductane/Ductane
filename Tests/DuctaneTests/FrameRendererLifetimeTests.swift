@@ -10,7 +10,7 @@ struct FrameRendererLifetimeTests {
     /// queue, as the layer would.
     @Test("A freed renderer lets go of what it made resident, though its queue lives on")
     @MainActor
-    func freedRendererReleasesItsAllocations() throws {
+    func freedRendererReleasesItsAllocations() async throws {
         guard let device = MTLCreateSystemDefaultDevice(), device.supportsFamily(.metal4) else { return }
         var renderer: FrameRenderer? = try FrameRenderer(device: device)
         let queue = try #require(renderer?.commandQueue)
@@ -23,6 +23,10 @@ struct FrameRendererLifetimeTests {
         }
         #expect(buffer != nil)
         renderer = nil
+        // Metal lets go of a residency set's allocations on its own time, so a busy machine is given a moment.
+        for _ in 0..<200 where buffer != nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         #expect(buffer == nil)
         withExtendedLifetime(queue) {}
     }

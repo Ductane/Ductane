@@ -381,13 +381,13 @@ struct SoundscapeTests {
         music.play(playlist: tracks)
         await music.settle()
         #expect(music.playlist == tracks)
-        #expect(await music.current()?.lastPathComponent == "one.caf")
-        var seen: Set<String> = []
-        for _ in 0..<12 {
-            try await Task.sleep(for: .milliseconds(100))
-            if let name = await music.current()?.lastPathComponent { seen.insert(name) }
+        // Read from the deck's own record: this test's main actor can be held up for longer than a track lasts.
+        var started: [String] = []
+        for _ in 0..<200 where started.count < 3 {
+            try await Task.sleep(for: .milliseconds(50))
+            started = await music.startedTracks().map(\.lastPathComponent)
         }
-        #expect(seen.contains("two.caf"), "the second track followed the first: \(seen)")
+        #expect(Array(started.prefix(3)) == ["one.caf", "two.caf", "one.caf"], "the tracks started in the order \(started)")
         music.stop(fade: 0)
         await music.settle()
         #expect(await music.current() == nil)

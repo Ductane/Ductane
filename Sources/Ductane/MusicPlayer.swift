@@ -161,6 +161,12 @@ public final class MusicPlayer {
 
     /// The track the deck is playing right now — for a test, or a game that shows what is on.
     public func current() async -> URL? { await deck.current }
+
+    #if DEBUG
+    /// Every track the deck has started, in order. **The deck's own record**, because a test asking ``current()`` from a
+    /// busy main actor can arrive after a short track has already given way to the next.
+    func startedTracks() async -> [URL] { await deck.started }
+    #endif
 }
 
 /// The one `AVAudioPlayer`, owned by an actor so that nothing touching it runs on the main thread.
@@ -175,6 +181,9 @@ private actor Deck {
 
     var isPlaying: Bool { player?.isPlaying ?? false }
     var current: URL? { player?.url }
+    #if DEBUG
+    private(set) var started: [URL] = []
+    #endif
 
     func start(_ tracks: [URL], volume: Float, fadeIn: TimeInterval) {
         guard player == nil, !tracks.isEmpty else { return }
@@ -197,6 +206,9 @@ private actor Deck {
     private func begin(at index: Int, volume: Float, fadeIn: TimeInterval) -> Bool {
         guard let player = try? AVAudioPlayer(contentsOf: tracks[index]) else { return false }
         self.index = index
+        #if DEBUG
+        started.append(tracks[index])
+        #endif
         player.numberOfLoops = tracks.count == 1 ? -1 : 0
         player.volume = fadeIn > 0 ? 0 : volume
         player.prepareToPlay()
