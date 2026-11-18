@@ -2888,7 +2888,7 @@ final class SampleGame: GameLoop {
 
     /// The engine's splash, while it lasts. **An overlay and a clock, not a mode** — the game steps
     /// behind it, so a walk that begins under it ends exactly where it would have.
-    private var splash: SplashScreen? = SampleGame.showsSplash ? SplashScreen(lead: "MADE WITH") : nil
+    private var splash: SplashScreen? = SampleGame.showsSplash ? SplashScreen(lead: "Made with") : nil
 
     /// Any press cuts the splash short — **and goes on to do whatever it was going to do.** A splash
     /// that swallowed it would swallow the first key of a scripted walk; there is a walk that checks.

@@ -290,6 +290,8 @@ struct SecondLevelTests {
         let old = """
         {"version":1,"bestSeconds":12.5,"runs":4,"wins":2}
         """
+        // Nothing has saved through this store yet, so on a clean machine its folder does not exist.
+        try FileManager.default.createDirectory(at: store.url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data(old.utf8).write(to: store.url)
         let progress = try #require(try store.load())
         #expect(progress.version == SampleRun.Progress.currentVersion)
