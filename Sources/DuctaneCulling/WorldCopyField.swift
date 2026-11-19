@@ -46,8 +46,17 @@ public nonisolated struct WorldCopyField: Sendable {
             self.radius = simd_length(maximum - minimum) / 2
             self.scale = scale
             self.prop = prop
-            let x = Int((transform.columns.3.x * 16).rounded()), z = Int((transform.columns.3.z * 16).rounded())
-            self.seed = (x &* 73_856_093) ^ (z &* 19_349_663)
+            // From the bits of where it stands, to a sixteenth of a metre — never `Int(_:)` of the float, which traps on a
+            // NaN, an infinity or anything past `Int`'s range, and a position comes from a world file, data from anyone.
+            // Mixed (SplitMix64's finalizer) and kept to 24 bits, so the golden-ratio hash that picks the copies gets a
+            // number small enough for a `Double` to keep its fraction.
+            let x = UInt64((transform.columns.3.x * 16).rounded().bitPattern)
+            let z = UInt64((transform.columns.3.z * 16).rounded().bitPattern)
+            var h = (x << 32 | z) &+ 0x9E37_79B9_7F4A_7C15
+            h = (h ^ (h >> 30)) &* 0xBF58_476D_1CE4_E5B9
+            h = (h ^ (h >> 27)) &* 0x94D0_49BB_1331_11EB
+            h ^= h >> 31
+            self.seed = Int(h >> 40)
         }
     }
 

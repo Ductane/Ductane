@@ -666,7 +666,10 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
     public static func read(_ data: Data) throws -> WorldFile {
         let file = try JSONDecoder().decode(WorldFile.self, from: data)
         guard file.version <= version else { throw ReadError.newer(file.version) }
-        if let bad = file.placements.first(where: { !file.props.indices.contains($0.prop) || $0.matrix.count != 16 }) {
+        // A matrix that is not sixteen finite numbers places nothing anywhere sensible, and a renderer working from it only
+        // draws garbage or worse: refused, like a prop that is not there.
+        if let bad = file.placements.first(where: { !file.props.indices.contains($0.prop) || $0.matrix.count != 16
+                                                    || !$0.matrix.allSatisfy(\.isFinite) }) {
             throw ReadError.badPlacement(bad.prop)
         }
         let named = file.placements.flatMap { $0.materials.values.map(\.prop) } + file.characters + Array(file.effectMeshes.values)

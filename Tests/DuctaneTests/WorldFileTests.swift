@@ -43,6 +43,13 @@ struct WorldFileTests {
         file.groundCover = [7: true]
         #expect(throws: WorldFile.ReadError.badProp(7)) { try WorldFile.read(file.data()) }
 
+        // JSON has no NaN or infinity, and a number past a float's range is refused by the decoder: no placement read from
+        // a file can carry one (`read` checks again, for whatever else decodes a description).
+        let huge = #"{"name":"w","props":["a.usda"],"placements":[{"prop":0,"matrix":[1,0,0,0,0,1,0,0,0,0,1,0,1e39,0,0,1]}]}"#
+        var refused = false
+        do { _ = try WorldFile.read(Data(huge.utf8)) } catch { refused = true }
+        #expect(refused, "a number past a float's range was read")
+
         // The shape: all cut-out cards, and low or spread wide.
         #expect(GroundCover.byShape(size: SIMD3(1, 0.5, 1), cutOut: true))
         #expect(GroundCover.byShape(size: SIMD3(34, 2, 34), cutOut: true), "a wide patch")

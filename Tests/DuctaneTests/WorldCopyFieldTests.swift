@@ -161,6 +161,23 @@ struct WorldCopyFieldTests {
         #expect(half.others == all.others && quarter.others == all.others, "what is not ground cover was thinned")
     }
 
+    /// A copy's place comes from a world file, data from anyone: a position that is not a number, infinite or past any
+    /// integer must not stop the game when its thinning seed is made from it.
+    @Test("A copy anywhere — not a number, infinite, past any integer — gets a seed without trapping")
+    func seedFromAnyPlace() {
+        for value: Float in [.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -1e30, 3.25] {
+            let place = SIMD3<Float>(value, 0, value)
+            let copy = WorldCopyField.Copy(transform: simd_float4x4(translation: place), minimum: place, maximum: place,
+                                           scale: 1, prop: 0)
+            _ = WorldCopyField.keeps(copy.seed, atDensity: 0.5)
+        }
+        let a = WorldCopyField.Copy(transform: simd_float4x4(translation: SIMD3(1, 0, 2)), minimum: .zero, maximum: .one,
+                                    scale: 1, prop: 0)
+        let b = WorldCopyField.Copy(transform: simd_float4x4(translation: SIMD3(1, 5, 2)), minimum: .zero, maximum: .one,
+                                    scale: 2, prop: 1)
+        #expect(a.seed == b.seed, "the seed is where it stands on the ground, whatever else differs")
+    }
+
     /// The draw distance divides the smallest size drawn, so every kind comes in by the same share of its own distance.
     @Test("A shorter draw distance brings every kind in by the same share of its own distance")
     func drawDistanceIsAShareOfEachKindsOwn() {
