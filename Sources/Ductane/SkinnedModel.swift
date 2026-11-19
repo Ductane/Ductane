@@ -89,7 +89,11 @@ public nonisolated struct SkinnedGeometry: Sendable {
     let normal: (layout: Int, offset: Int)?
     let tangent: (layout: Int, offset: Int, hasHandedness: Bool)?
 
-    /// Reads every skinned mesh in a USD file, laid out by the game's vertex descriptor.
+    /// Reads every skinned mesh in a USD or glTF file, laid out by the game's vertex descriptor.
+    ///
+    /// **glTF comes out as the same character in USD would** — its vertices in skeleton space at rest, its rigid
+    /// attachments bound to their joints, its texture coordinates v-up and its materials' factors kept, as
+    /// ``MeshLoader`` reads a glTF prop. Compressed files (Draco, meshopt, quantized) are read.
     ///
     /// - Parameters:
     ///   - vertexDescriptor: the game's **static** layout — the one its ordinary pipeline draws with. The posed
@@ -98,10 +102,35 @@ public nonisolated struct SkinnedGeometry: Sendable {
     ///   - semantics: attribute index to Model I/O semantic, as for ``MeshLoader``. Position is required, and must
     ///     be `float3`; a normal, if there is one, too; a tangent may be `float3` or `float4`.
     ///   - skeletonJointCount: the rig's joints, to check every influence against. ``SkinnedModel`` passes its rig's.
+    /// - Throws: ``SkinnedModelError``; for a glTF file that cannot be read, ``RigLoaderError/unreadable(_:reason:)``.
     public static func read(url: URL, vertexDescriptor: MTLVertexDescriptor, semantics: [Int: String],
                             skeletonJointCount: Int) throws -> SkinnedGeometry {
-        let name = url.lastPathComponent
         guard FileManager.default.fileExists(atPath: url.path) else { throw SkinnedModelError.assetNotFound(url.path) }
+        if RigLoader.isGLTF(url) {
+            return try read(RigLoader.gltfCharacter(at: url, withMeshes: true, reportingTo: { _ in }),
+                            named: url.lastPathComponent, vertexDescriptor: vertexDescriptor, semantics: semantics,
+                            skeletonJointCount: skeletonJointCount)
+        }
+        let asset = MDLAsset(url: url, vertexDescriptor: nil, bufferAllocator: MDLMeshBufferDataAllocator())
+        return try merge(allMeshes(in: asset), imported: [:], named: url.lastPathComponent,
+                         vertexDescriptor: vertexDescriptor, semantics: semantics, skeletonJointCount: skeletonJointCount)
+    }
+
+    /// A glTF character's skinned meshes, handed to Model I/O as ``MeshLoader`` hands a glTF prop, then merged as a USD
+    /// file's are.
+    static func read(_ character: GLTFCharacter, named name: String, vertexDescriptor: MTLVertexDescriptor,
+                     semantics: [Int: String], skeletonJointCount: Int) throws -> SkinnedGeometry {
+        let (asset, imported) = MeshLoader.makeAsset(character.model, influences: character.influences,
+                                                     allocator: MDLMeshBufferDataAllocator(), reportingTo: nil)
+        return try merge(allMeshes(in: asset), imported: imported, named: name, vertexDescriptor: vertexDescriptor,
+                         semantics: semantics, skeletonJointCount: skeletonJointCount)
+    }
+
+    /// Every one of `meshes` that carries joints, in the game's layout, merged.
+    /// - Parameter imported: per mesh built from glTF, its submeshes' materials, for the factors Model I/O cannot carry.
+    private static func merge(_ meshes: [MDLMesh], imported: [ObjectIdentifier: [ImportedMaterial?]], named name: String,
+                              vertexDescriptor: MTLVertexDescriptor, semantics: [Int: String],
+                              skeletonJointCount: Int) throws -> SkinnedGeometry {
         let modelDescriptor: MDLVertexDescriptor
         do {
             modelDescriptor = try MeshLoader.namedDescriptor(vertexDescriptor, semantics: semantics, file: name)
@@ -135,8 +164,7 @@ public nonisolated struct SkinnedGeometry: Sendable {
                                                   offset: 8, bufferIndex: skinLayout))
         reading.layouts.add(MDLVertexBufferLayout(stride: 24))
 
-        let asset = MDLAsset(url: url, vertexDescriptor: nil, bufferAllocator: MDLMeshBufferDataAllocator())
-        let meshes = allMeshes(in: asset).filter { mesh in
+        let meshes = meshes.filter { mesh in
             (mesh.vertexDescriptor.attributes as? [MDLVertexAttribute] ?? [])
                 .contains { $0.name == MDLVertexAttributeJointIndices && $0.format != .invalid }
         }
@@ -201,7 +229,8 @@ public nonisolated struct SkinnedGeometry: Sendable {
             }
             withExtendedLifetime(skin) {}
 
-            for submesh in mesh.submeshes as? [MDLSubmesh] ?? [] {
+            let factors = imported[ObjectIdentifier(mesh)]
+            for (index, submesh) in (mesh.submeshes as? [MDLSubmesh] ?? []).enumerated() {
                 guard submesh.geometryType == .triangles else { continue }
                 let buffer = submesh.indexBuffer(asIndexType: .uInt32)
                 let map = buffer.map()
@@ -209,7 +238,10 @@ public nonisolated struct SkinnedGeometry: Sendable {
                     base + map.bytes.advanced(by: $0 * 4).loadUnaligned(as: UInt32.self)
                 }
                 withExtendedLifetime(map) {}
-                let material = submesh.material.map { Material($0) } ?? Material()
+                var material = submesh.material.map { Material($0) } ?? Material()
+                if let factors, factors.indices.contains(index) {
+                    material = MeshLoader.withFactors([material], from: [factors[index]])[0]
+                }
                 if let same = groups.firstIndex(where: { Self.sameSurface($0.material, material) }) {
                     groups[same].indices += indices
                 } else {
@@ -288,7 +320,8 @@ public final class SkinnedModel {
     let weightBuffer: MTLBuffer
     let parameters: MTLBuffer
 
-    /// Loads a character exported to USD — the skeleton and its clips through ``RigLoader``, every skinned mesh merged.
+    /// Loads a character exported to USD or glTF — the skeleton and its clips through ``RigLoader``, every skinned mesh
+    /// merged.
     ///
     /// - Parameters: as ``SkinnedGeometry/read(url:vertexDescriptor:semantics:skeletonJointCount:)``; the descriptor is
     ///   the game's static one, the one its prop pipeline was built with.
@@ -308,7 +341,20 @@ public final class SkinnedModel {
     /// **The slow half of loading a character, off the main thread**: the skeleton, every clip and every skinned mesh
     /// read and merged. A character takes a second or more to read — a game's window frozen for that long, several times
     /// over, if it is read where it is drawn. Pass the same descriptor and semantics to the initialiser that finishes it.
-    public nonisolated static func read(url: URL, vertexDescriptor: MTLVertexDescriptor, semantics: [Int: String]) throws -> Source {
+    ///
+    /// **A glTF file is read once** for both: its skeleton, clips and meshes come from the one reading.
+    /// - Parameter report: told of a clip in a glTF file that was left out (``RigLoader/Warning/clipDropped(file:clip:reason:)``).
+    public nonisolated static func read(url: URL, vertexDescriptor: MTLVertexDescriptor, semantics: [Int: String],
+                                        reportingTo report: (RigLoader.Warning) -> Void = { _ in }) throws -> Source {
+        if RigLoader.isGLTF(url) {
+            let character = try RigLoader.gltfCharacter(at: url, withMeshes: true, reportingTo: report)
+            guard let skeleton = character.skeleton else { throw RigLoaderError.noSkeleton(url.lastPathComponent) }
+            let rig = Rig(skeleton: skeleton, clips: character.clips, nodeTransform: character.nodeTransform)
+            let geometry = try SkinnedGeometry.read(character, named: url.lastPathComponent,
+                                                    vertexDescriptor: vertexDescriptor, semantics: semantics,
+                                                    skeletonJointCount: skeleton.jointCount)
+            return Source(url: url, rig: rig, geometry: geometry)
+        }
         let rig = try RigLoader.load(url: url)
         let geometry = try SkinnedGeometry.read(url: url, vertexDescriptor: vertexDescriptor, semantics: semantics,
                                                 skeletonJointCount: rig.skeleton.jointCount)

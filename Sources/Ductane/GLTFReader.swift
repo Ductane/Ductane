@@ -46,8 +46,9 @@ public nonisolated extension ImportedModel {
     /// Reads a glTF 2.0 file — `.gltf`, with its buffers embedded or in files beside it, or `.glb`.
     ///
     /// Every mesh in the default scene comes out placed by its node's transform, with its materials and their
-    /// images. Skins and animations are not read: a skinned mesh comes out in its bind pose. Compressed files
-    /// are read — meshopt, Draco, quantized attributes and KTX2 textures.
+    /// images. A skinned mesh comes out standing still, where its joints stand at rest: its skeleton, skin and clips
+    /// are read by ``RigLoader`` and ``SkinnedModel``, which take glTF as they take USD. Compressed files are read —
+    /// meshopt, Draco, quantized attributes and KTX2 textures.
     ///
     /// - Parameter report: told about anything left out on the way — an image that could not be read, lines or
     ///   points that are not triangles — which does not stop the rest being read.
@@ -59,10 +60,11 @@ public nonisolated extension ImportedModel {
 
 /// Reads glTF 2.0 into an ``ImportedModel``. Written in Swift, because nothing Apple ships reads glTF.
 ///
-/// **Extracted from a character-creator app's reader, with the rig taken out.** What a prop needs from a file
-/// is narrower than what glTF can say, and the rest is read past rather than refused: cameras, lights, skins,
-/// morph targets and animations are ignored. Only a file that *requires* an extension this does not understand
-/// is turned away, because its geometry or its look would otherwise come out as garbage.
+/// **Extracted from a character-creator app's reader.** What a prop needs from a file is narrower than what glTF can
+/// say, and the rest is read past rather than refused: cameras, lights and morph targets are ignored, and a prop is
+/// read without its skin and clips — a character's are read by ``GLTFCharacter``, further down. Only a file that
+/// *requires* an extension this does not understand is turned away, because its geometry or its look would otherwise
+/// come out as garbage.
 ///
 /// - **Every mesh is placed by its node's world transform**, composed from the scene's roots — all the nodes of
 ///   the default scene, or every node nothing parents when the file has no scenes, which glTF allows.
@@ -84,6 +86,15 @@ nonisolated enum GLTFReader {
     ]
 
     static func read(url: URL, reportingTo report: ((String) -> Void)?) throws -> ImportedModel {
+        try reader(url: url, reportingTo: report).read()
+    }
+
+    /// A skinned character: its skeleton, clips and — when `withMeshes` — its skinned meshes. See ``GLTFCharacter``.
+    static func character(url: URL, withMeshes: Bool, reportingTo report: ((String) -> Void)?) throws -> GLTFCharacter {
+        try reader(url: url, reportingTo: report).character(withMeshes: withMeshes)
+    }
+
+    private static func reader(url: URL, reportingTo report: ((String) -> Void)?) throws -> Reader {
         let file = url.lastPathComponent
         guard let data = try? Data(contentsOf: url) else { throw GLTFError.unreadable(file: file) }
         let (json, glbBinary) = try container(data, file: file)
@@ -102,7 +113,7 @@ nonisolated enum GLTFReader {
         let buffers = try (document.buffers ?? []).enumerated().map { index, buffer in
             try load(buffer, index: index, glbBinary: glbBinary, beside: url)
         }
-        return try Reader(document: document, buffers: buffers, url: url, report: report).read()
+        return try Reader(document: document, buffers: buffers, url: url, report: report)
     }
 
     // MARK: Containers and buffers
@@ -205,8 +216,8 @@ private nonisolated struct Reader {
     let report: ((String) -> Void)?
 
     /// Parent of every node, and the order a depth-first walk of the scene meets them.
-    private let parents: [Int?]
-    private let sceneOrder: [Int]
+    fileprivate let parents: [Int?]
+    fileprivate let sceneOrder: [Int]
 
     /// Compressed buffer views, decoded once, by view index. Everything downstream reads these as if
     /// the file had never been compressed.
@@ -216,7 +227,7 @@ private nonisolated struct Reader {
     let url: URL
     /// Decoded images, shared by every material that uses them. A class so a `Reader` value can fill
     /// it as materials ask.
-    private let images = ImageCache()
+    fileprivate let images = ImageCache()
 
     init(document: Document, buffers: [Data], url: URL, report: ((String) -> Void)?) throws {
         self.document = document
@@ -267,7 +278,7 @@ private nonisolated struct Reader {
         sceneOrder = order
     }
 
-    private var nodes: [Document.Node] { document.nodes ?? [] }
+    fileprivate var nodes: [Document.Node] { document.nodes ?? [] }
 
     func read() throws -> ImportedModel {
         // Every material in the file, in its order, so a submesh's index is the file's own.
@@ -283,7 +294,7 @@ private nonisolated struct Reader {
 
     /// Two matrices equal to a tolerance scaled by their size, so a matrix holding quantization's tiny
     /// scale is compared as carefully as one holding metres.
-    private static func same(_ a: simd_float4x4, _ b: simd_float4x4) -> Bool {
+    fileprivate static func same(_ a: simd_float4x4, _ b: simd_float4x4) -> Bool {
         let scale = max(1e-6, (0..<4).flatMap { c in (0..<4).map { max(abs(a[c][$0]), abs(b[c][$0])) } }.max() ?? 1)
         return (0..<4).allSatisfy { c in (0..<4).allSatisfy { abs(a[c][$0] - b[c][$0]) <= scale * 1e-4 } }
     }
@@ -304,6 +315,14 @@ private nonisolated struct Reader {
 
     /// One node's mesh: every triangle primitive, its vertices appended to the mesh's, one submesh each.
     private func makeMesh(_ mesh: Document.Mesh, node: Int, materialCount: Int) throws -> ImportedMesh? {
+        try makeMesh(mesh, node: node, materialCount: materialCount, skin: nil)?.mesh
+    }
+
+    /// The same, and with `skin` — the skeleton's joint for each of the skin's — every vertex's four influences too,
+    /// read alongside its position so the two stay one per vertex.
+    private func makeMesh(_ mesh: Document.Mesh, node: Int, materialCount: Int, skin remap: [UInt16]?) throws
+        -> (mesh: ImportedMesh, influences: [Influence])? {
+        var influences: [Influence] = []
         var positions: [SIMD3<Float>] = [], normals: [SIMD3<Float>] = []
         var uvs: [SIMD2<Float>] = [], colors: [SIMD4<Float>] = []
         var submeshes: [ImportedSubmesh] = []
@@ -355,6 +374,7 @@ private nonisolated struct Reader {
                 guard read.count == count else { throw GLTFError.unreadable(file: file) }
                 colors += read
             }
+            if let remap { influences += try self.influences(source, count: count, remap: remap) }
             positions += primitivePositions
             guard !indices.isEmpty else { continue }
             let material = primitive.material.flatMap { (0..<materialCount).contains($0) ? $0 : nil }
@@ -375,14 +395,14 @@ private nonisolated struct Reader {
         if let skin = nodes[node].skin.flatMap({ document.skins?[safe: $0] }), let placed = try bindPlacement(of: skin) {
             transform = placed
         }
-        return ImportedMesh(name: name, transform: transform, positions: positions, normals: normals, uvs: uvs,
-                            colors: colors, submeshes: submeshes)
+        return (ImportedMesh(name: name, transform: transform, positions: positions, normals: normals, uvs: uvs,
+                             colors: colors, submeshes: submeshes), influences)
     }
 
     // MARK: Materials
 
     /// A glTF material, factors and textures both, as glTF defines them.
-    private func material(_ m: Document.Material) -> ImportedMaterial {
+    fileprivate func material(_ m: Document.Material) -> ImportedMaterial {
         let pbr = m.pbrMetallicRoughness
         let base = pbr?.baseColorFactor ?? [1, 1, 1, 1]
         let emissive = m.emissiveFactor ?? [0, 0, 0]
@@ -457,13 +477,13 @@ private nonisolated struct Reader {
     }
 
     /// Root first, ending at the node itself.
-    private func ancestry(of node: Int) -> [Int] {
+    fileprivate func ancestry(of node: Int) -> [Int] {
         var chain = [node], at = node
         while let parent = parents[at], !chain.contains(parent) { chain.append(parent); at = parent }
         return chain.reversed()
     }
 
-    private func worldTransform(of node: Int) -> simd_float4x4 {
+    fileprivate func worldTransform(of node: Int) -> simd_float4x4 {
         ancestry(of: node).reduce(matrix_identity_float4x4) { $0 * TRS(nodes[$1]).matrix }
     }
 
@@ -537,7 +557,7 @@ private nonisolated struct Reader {
         }
     }
 
-    private func readMatrices(_ index: Int) throws -> [simd_float4x4] {
+    fileprivate func readMatrices(_ index: Int) throws -> [simd_float4x4] {
         try readFloats(index, components: 16).map { m in
             simd_float4x4(columns: (SIMD4(m[0], m[1], m[2], m[3]), SIMD4(m[4], m[5], m[6], m[7]),
                                     SIMD4(m[8], m[9], m[10], m[11]), SIMD4(m[12], m[13], m[14], m[15])))
@@ -579,6 +599,440 @@ private nonisolated struct Reader {
             return normalized ? v / 65535 : v
         case 5125: return Float(UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self)))
         default: return Float(bitPattern: UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self)))
+        }
+    }
+}
+
+// MARK: Characters
+
+/// A skinned character read out of glTF — its skeleton, its clips and its skinned meshes — for ``RigLoader`` and
+/// ``SkinnedGeometry`` to make theirs from, so the two read one file the same way.
+///
+/// **The same shape as a character read from USD.** glTF says a rig differently, and each difference is settled here:
+///
+/// - **Joints are nodes, in any order, under any nodes.** They are taken in the skin's own order when it is parent
+///   first — what every exporter met writes, and the order the same character's USD export has — and in the scene's
+///   order otherwise. A joint is named by its path of joint names, `Hips/Spine/Neck`, as USD names it.
+/// - **What stands above the root joint is the rig's place in the file**, ``Rig/nodeTransform`` — the armature an
+///   exporter puts there, with its unit scale or axis turn: an exported character in centimetres under a parent scaled
+///   by 0.01 keeps its centimetres, as its USD export does. A node *between* two joints is not a joint and has nowhere
+///   else to go, so its transform is folded into the joint beneath it, at rest and in every key of every clip.
+/// - **glTF has no rest pose apart from where the joints stand**, so a joint's node transform is its rest, and the
+///   skin's inverse bind matrices say where the mesh was bound.
+/// - **A skin's vertices are put into the skeleton's space at rest.** glTF only promises that a joint's world transform
+///   times its inverse bind matrix places a vertex, and an exporter may fold a transform of its own into every inverse
+///   bind — gltfpack does, to turn quantized integers back into metres. When every joint of a skin, standing where the
+///   file has it, times its inverse bind gives the same matrix, that matrix is where the skin's vertices stand: it is
+///   moved into the vertices and out of the inverse binds, so the skeleton's inverse binds are each joint's rest
+///   inverted, as a USD file's are. When they disagree the rig was saved posed away from its bind, and the file is
+///   taken as written. Either way a vertex skins to exactly where glTF says it goes.
+/// - **A mesh hung under a joint without a skin is a rigid attachment**, as a sword in a hand is usually exported: it
+///   is bound wholly to that joint, as USD's constant joint influences bind one. A mesh neither skinned nor under a
+///   joint is not part of the character, and is left out, as the USD reader leaves out a mesh with no joints.
+/// - **A clip is every key any of its channels has**, its joints sampled at each — the engine's clips keep one set of
+///   times per channel, glTF one per joint. Linear keys are kept exactly: a straight line or a slerp sampled at its own
+///   breakpoints and the points between is the same curve. A step is kept as a step, by a second key at the instant it
+///   changes. A cubic spline bends between its keys, so it is sampled thirty times a second as well. **Its times start
+///   at zero**, as the same clip's do from USD, wherever the file's first key is.
+/// - **Up to eight influences are read** (`JOINTS_1` and `WEIGHTS_1` beside the first four), and a vertex keeps its four
+///   strongest, its weights made to sum to one again.
+nonisolated struct GLTFCharacter: Sendable {
+    /// Nil for a file with no skin — an animation-only file. Its clips then name, as joints, the nodes they move and
+    /// the nodes between them, from the topmost node moved down.
+    let skeleton: Skeleton?
+    /// Where the skeleton stands in the file: the world transform of the root joint's parent.
+    let nodeTransform: simd_float4x4
+    let clips: [AnimationClip]
+    /// Clips left out, and why.
+    let droppedClips: [(clip: String, reason: String)]
+    /// The skinned meshes and rigid attachments, in skeleton space at rest, with the file's materials. Empty unless
+    /// meshes were asked for.
+    let model: ImportedModel
+    /// Per mesh of ``model``, per vertex: four joints of ``skeleton`` and their weights, summing to one.
+    let influences: [[Influence]]
+}
+
+/// A vertex's four joints and their weights.
+nonisolated struct Influence: Sendable, Equatable {
+    var joints: SIMD4<UInt16>
+    var weights: SIMD4<Float>
+}
+
+private nonisolated extension Reader {
+
+    /// The joints of a rig, and how glTF's nodes reach them.
+    struct Joints {
+        let paths: [String]
+        /// Node index → joint index.
+        let jointOfNode: [Int: Int]
+        /// Joint index → node index.
+        let nodeOfJoint: [Int]
+        /// The root joint's parent's world transform: where the rig stands in the file.
+        let nodeTransform: simd_float4x4
+        /// Per joint: what lies between it and its parent joint — the nodes that are not joints, or for a root, its
+        /// parent's world transform relative to ``nodeTransform``. Identity almost always.
+        let between: [simd_float4x4]
+        /// Per joint: its node's own transform.
+        let rest: [JointTransform]
+
+        /// Per joint: relative to its parent joint, with what lies between folded in.
+        var restLocal: [simd_float4x4] { zip(between, rest).map { $0 * $1.matrix } }
+    }
+
+    func character(withMeshes: Bool) throws -> GLTFCharacter {
+        let skins = document.skins ?? []
+        var skeleton: Skeleton?
+        var joints: Joints?
+        var vertexTransforms: [Int: simd_float4x4] = [:]
+        if let skinned = skinJoints(skins) {
+            let rig = makeJoints(skinned)
+            let local = rig.restLocal
+            var modelRest: [simd_float4x4] = []
+            for (joint, node) in rig.nodeOfJoint.enumerated() {
+                let parent = nearestJoint(above: node, in: rig.jointOfNode)
+                modelRest.append((parent.map { modelRest[$0] } ?? matrix_identity_float4x4) * local[joint])
+            }
+            let undoPlacement = rig.nodeTransform.inverse
+            // Inverse binds from whichever skin names a joint first, with the skin's own placement taken out — see
+            // ``GLTFCharacter``. A joint no skin gives a matrix (glTF allows leaving them out) is bound where it stands.
+            var inverseBinds = [simd_float4x4?](repeating: nil, count: rig.paths.count)
+            for (index, skin) in skins.enumerated() {
+                let matrices = try skin.inverseBindMatrices.map { try readMatrices($0) } ?? []
+                let shapes = skin.joints.enumerated().compactMap { position, node -> simd_float4x4? in
+                    nodes.indices.contains(node)
+                        ? worldTransform(of: node) * (matrices[safe: position] ?? matrix_identity_float4x4) : nil
+                }
+                var shape = matrix_identity_float4x4
+                if let first = shapes.first, shapes.allSatisfy({ Self.same($0, first) }), abs(first.determinant) > 1e-12 {
+                    shape = first
+                }
+                let toSkeleton = undoPlacement * shape
+                vertexTransforms[index] = toSkeleton
+                let undo = toSkeleton.inverse
+                for (position, node) in skin.joints.enumerated() {
+                    guard let joint = rig.jointOfNode[node], inverseBinds[joint] == nil else { continue }
+                    inverseBinds[joint] = (matrices[safe: position] ?? matrix_identity_float4x4) * undo
+                }
+            }
+            skeleton = try Skeleton(jointPaths: rig.paths, restTransforms: local,
+                                    inverseBindTransforms: inverseBinds.enumerated().map { $1 ?? modelRest[$0].inverse })
+            joints = rig
+        } else if let animated = animatedJoints() {
+            joints = makeJoints(animated)
+        }
+
+        var clips: [AnimationClip] = [], dropped: [(clip: String, reason: String)] = []
+        if let joints {
+            for (index, animation) in (document.animations ?? []).enumerated() {
+                let name = animation.name.flatMap { $0.isEmpty ? nil : $0 } ?? "Animation \(index + 1)"
+                do {
+                    if let clip = try makeClip(animation, name: name, joints: joints) { clips.append(clip) }
+                } catch let problem as ClipProblem {
+                    dropped.append((name, problem.reason))
+                }
+            }
+        }
+
+        var meshes: [ImportedMesh] = [], influences: [[Influence]] = []
+        var materials: [ImportedMaterial] = []
+        if withMeshes, let skeleton, let joints {
+            materials = (document.materials ?? []).map(material)
+            for node in sceneOrder {
+                guard let meshIndex = nodes[node].mesh, let mesh = document.meshes?[safe: meshIndex] else { continue }
+                if let skinIndex = nodes[node].skin, let skin = skins[safe: skinIndex] {
+                    let remap = skin.joints.map { joints.jointOfNode[$0].map(UInt16.init) ?? 0 }
+                    guard let made = try makeMesh(mesh, node: node, materialCount: materials.count, skin: remap),
+                          made.influences.count == made.mesh.positions.count else { continue }
+                    meshes.append(Self.placed(made.mesh, by: vertexTransforms[skinIndex] ?? matrix_identity_float4x4))
+                    influences.append(made.influences)
+                } else if let jointNode = ancestry(of: node).dropLast().last(where: { joints.jointOfNode[$0] != nil }),
+                          let joint = joints.jointOfNode[jointNode],
+                          let made = try makeMesh(mesh, node: node, materialCount: materials.count) {
+                    // Hung under a joint: taken into skeleton space where it stands, then back by the joint's bind, so
+                    // the joint's skinning matrix carries it from there — the identity at rest.
+                    let bind = skeleton.inverseBindTransforms[joint].inverse
+                    let standing = joints.nodeTransform.inverse * worldTransform(of: node)
+                    let atRest = joints.nodeTransform.inverse * worldTransform(of: jointNode)
+                    meshes.append(Self.placed(made, by: bind * atRest.inverse * standing))
+                    influences.append(Array(repeating: Influence(joints: SIMD4(UInt16(joint), 0, 0, 0),
+                                                                 weights: SIMD4(1, 0, 0, 0)),
+                                            count: made.positions.count))
+                }
+            }
+            for path in images.missing { report?("\(file): the image \(path) could not be read") }
+        }
+        return GLTFCharacter(skeleton: skeleton, nodeTransform: joints?.nodeTransform ?? matrix_identity_float4x4,
+                             clips: clips, droppedClips: dropped, model: ImportedModel(meshes: meshes, materials: materials),
+                             influences: influences)
+    }
+
+    /// A mesh's vertices moved by `m`, its normals turned with them, standing at the origin.
+    static func placed(_ mesh: ImportedMesh, by m: simd_float4x4) -> ImportedMesh {
+        var mesh = mesh
+        mesh.transform = matrix_identity_float4x4
+        guard m != matrix_identity_float4x4 else { return mesh }
+        let upper = simd_float3x3(SIMD3(m.columns.0.x, m.columns.0.y, m.columns.0.z),
+                                  SIMD3(m.columns.1.x, m.columns.1.y, m.columns.1.z),
+                                  SIMD3(m.columns.2.x, m.columns.2.y, m.columns.2.z))
+        let normalMatrix = upper.inverse.transpose
+        mesh.positions = mesh.positions.map { let p = m * SIMD4($0, 1); return SIMD3(p.x, p.y, p.z) }
+        mesh.normals = mesh.normals.map { simd_length($0) > 0 ? simd_normalize(normalMatrix * $0) : $0 }
+        return mesh
+    }
+
+    // MARK: Joints
+
+    /// Every node any skin names, parent first: the skins' own order when it already is, the scene's otherwise.
+    func skinJoints(_ skins: [Document.Skin]) -> [Int]? {
+        var ordered: [Int] = [], seen = Set<Int>()
+        for skin in skins {
+            for node in skin.joints where nodes.indices.contains(node) && seen.insert(node).inserted { ordered.append(node) }
+        }
+        guard !ordered.isEmpty else { return nil }
+        return parentFirst(ordered) ? ordered : sceneOrdered(seen)
+    }
+
+    /// For a file with no skin: the nodes its animations move, and any node between two of them, so a clip still
+    /// names its joints by the paths the same rig's skinned file gives them.
+    func animatedJoints() -> [Int]? {
+        let moved = Set((document.animations ?? []).flatMap { animation in
+            animation.channels.compactMap { channel -> Int? in
+                ["translation", "rotation", "scale"].contains(channel.target.path) ? channel.target.node : nil
+            }
+        }.filter { nodes.indices.contains($0) })
+        guard !moved.isEmpty else { return nil }
+        var joints = moved
+        for node in moved {
+            var between: [Int] = [], at = parents[node]
+            while let above = at, !moved.contains(above) { between.append(above); at = parents[above] }
+            if at != nil { joints.formUnion(between) }
+        }
+        return sceneOrdered(joints)
+    }
+
+    func sceneOrdered(_ set: Set<Int>) -> [Int] {
+        sceneOrder.filter { set.contains($0) } + set.subtracting(sceneOrder).sorted()
+    }
+
+    func nearestJoint(above node: Int, in jointOfNode: [Int: Int]) -> Int? {
+        var at = parents[node]
+        while let above = at {
+            if let joint = jointOfNode[above] { return joint }
+            at = parents[above]
+        }
+        return nil
+    }
+
+    func parentFirst(_ ordered: [Int]) -> Bool {
+        var position: [Int: Int] = [:]
+        for (index, node) in ordered.enumerated() { position[node] = index }
+        return ordered.enumerated().allSatisfy { index, node in
+            nearestJoint(above: node, in: position).map { $0 < index } ?? true
+        }
+    }
+
+    func makeJoints(_ ordered: [Int]) -> Joints {
+        var jointOfNode: [Int: Int] = [:]
+        for (joint, node) in ordered.enumerated() { jointOfNode[node] = joint }
+        let placement = parents[ordered[0]].map(worldTransform(of:)) ?? matrix_identity_float4x4
+        var paths: [String] = [], between: [simd_float4x4] = [], rest: [JointTransform] = []
+        var taken = Set<String>()
+        for node in ordered {
+            // Up to the nearest ancestor that is a joint, gathering what lies between.
+            var prefix = matrix_identity_float4x4
+            var ancestor = parents[node]
+            while let above = ancestor, jointOfNode[above] == nil {
+                prefix = TRS(nodes[above]).matrix * prefix
+                ancestor = parents[above]
+            }
+            let parentPath = ancestor.flatMap { jointOfNode[$0] }.map { paths[$0] }
+            if parentPath == nil { prefix = placement.inverse * prefix }
+            var name = (nodes[node].name ?? "").replacingOccurrences(of: "/", with: "_")
+            if name.isEmpty { name = "joint\(node)" }
+            var path = parentPath.map { "\($0)/\(name)" } ?? name
+            // Two siblings with one name would be one path, and the second would lose its parent.
+            if taken.contains(path) { path += "_\(node)" }
+            taken.insert(path)
+            paths.append(path)
+            between.append(Self.same(prefix, matrix_identity_float4x4) ? matrix_identity_float4x4 : prefix)
+            let trs = TRS(nodes[node])
+            rest.append(trs.written.map(JointTransform.init(matrix:))
+                        ?? JointTransform(translation: trs.translation, rotation: trs.rotation, scale: trs.scale))
+        }
+        return Joints(paths: paths, jointOfNode: jointOfNode, nodeOfJoint: ordered, nodeTransform: placement,
+                      between: between, rest: rest)
+    }
+
+    // MARK: Influences
+
+    /// A primitive's influences, its joints as the skeleton's — from `JOINTS_0`/`WEIGHTS_0`, and `JOINTS_1`/`WEIGHTS_1`
+    /// when there are eight, keeping the four strongest. A primitive with none follows the first joint.
+    func influences(_ source: PrimitiveSource, count: Int, remap: [UInt16]) throws -> [Influence] {
+        guard source.has("JOINTS_0"), source.has("WEIGHTS_0") else {
+            return Array(repeating: Influence(joints: SIMD4(remap.first ?? 0, 0, 0, 0), weights: SIMD4(1, 0, 0, 0)),
+                         count: count)
+        }
+        var sets = [(try source.floats("JOINTS_0", components: 4, rawIntegers: true),
+                     try source.floats("WEIGHTS_0", components: 4))]
+        if source.has("JOINTS_1"), source.has("WEIGHTS_1") {
+            sets.append((try source.floats("JOINTS_1", components: 4, rawIntegers: true),
+                         try source.floats("WEIGHTS_1", components: 4)))
+        }
+        guard sets.allSatisfy({ $0.0.count == count && $0.1.count == count }) else { throw GLTFError.unreadable(file: file) }
+        return try (0..<count).map { vertex in
+            var lanes: [(joint: UInt16, weight: Float)] = []
+            for (joints, weights) in sets {
+                for lane in 0..<4 where weights[vertex][lane] > 0 {
+                    let index = Int(joints[vertex][lane])
+                    guard index >= 0, index < remap.count else { throw GLTFError.unreadable(file: file) }
+                    lanes.append((remap[index], weights[vertex][lane]))
+                }
+            }
+            if lanes.count > 4 { lanes = Array(lanes.sorted { $0.weight > $1.weight }.prefix(4)) }
+            var influence = Influence(joints: .zero, weights: .zero)
+            for (lane, value) in lanes.enumerated() {
+                influence.joints[lane] = value.joint
+                influence.weights[lane] = value.weight
+            }
+            let sum = influence.weights.sum()
+            // A vertex weighted to nothing follows the first joint rather than collapsing to the origin.
+            influence.weights = sum > 1e-6 ? influence.weights / sum : SIMD4(1, 0, 0, 0)
+            if sum <= 1e-6 { influence.joints = SIMD4(remap.first ?? 0, 0, 0, 0) }
+            return influence
+        }
+    }
+
+    // MARK: Clips
+
+    struct ClipProblem: Error { let reason: String }
+
+    /// One glTF animation as a clip over the joints it moves, or nil when it moves none of them — morph weights alone,
+    /// or nodes that are not joints. Throws ``ClipProblem`` for a clip whose data cannot be trusted.
+    func makeClip(_ animation: Document.Animation, name: String, joints: Joints) throws -> AnimationClip? {
+        struct Track {
+            let times: [Float]
+            let values: [[Float]]
+            let interpolation: String
+
+            /// The last key at or before `time` — strictly before, for the instant a step changes.
+            func key(atOrBefore time: Float, strictly: Bool) -> Int {
+                var low = 0, high = times.count - 1
+                if strictly ? times[0] >= time : times[0] > time { return 0 }
+                while low < high {
+                    let mid = (low + high + 1) / 2
+                    if strictly ? times[mid] < time : times[mid] <= time { low = mid } else { high = mid - 1 }
+                }
+                return low
+            }
+
+            func value(_ key: Int) -> [Float] { values[interpolation == "CUBICSPLINE" ? key * 3 + 1 : key] }
+
+            func sample(at time: Float, before: Bool) -> [Float] {
+                if interpolation == "STEP" { return value(key(atOrBefore: time, strictly: before)) }
+                let previous = key(atOrBefore: time, strictly: false)
+                guard previous < times.count - 1, time > times[previous] else { return value(previous) }
+                let next = previous + 1
+                let span = times[next] - times[previous]
+                let s = span > 0 ? (time - times[previous]) / span : 0
+                let a = value(previous), b = value(next)
+                if interpolation == "CUBICSPLINE" {
+                    // Hermite, with the out-tangent of one key and the in-tangent of the next.
+                    let m0 = values[previous * 3 + 2], m1 = values[next * 3]
+                    let s2 = s * s, s3 = s2 * s
+                    return (0..<a.count).map { c in
+                        (2 * s3 - 3 * s2 + 1) * a[c] + (s3 - 2 * s2 + s) * span * m0[c]
+                            + (-2 * s3 + 3 * s2) * b[c] + (s3 - s2) * span * m1[c]
+                    }
+                }
+                if a.count == 4 {
+                    let q = simd_slerp(simd_quatf(vector: SIMD4(a[0], a[1], a[2], a[3])),
+                                       simd_quatf(vector: SIMD4(b[0], b[1], b[2], b[3])), s)
+                    return [q.vector.x, q.vector.y, q.vector.z, q.vector.w]
+                }
+                return zip(a, b).map { $0 + ($1 - $0) * s }
+            }
+        }
+
+        var tracks: [String: [Int: Track]] = [:]
+        for channel in animation.channels {
+            let path = channel.target.path
+            guard let node = channel.target.node, let joint = joints.jointOfNode[node],
+                  ["translation", "rotation", "scale"].contains(path) else { continue }
+            guard let sampler = animation.samplers[safe: channel.sampler] else {
+                throw ClipProblem(reason: "a channel names a sampler the clip does not have")
+            }
+            let interpolation = sampler.interpolation ?? "LINEAR"
+            guard ["LINEAR", "STEP", "CUBICSPLINE"].contains(interpolation) else {
+                throw ClipProblem(reason: "its interpolation \(interpolation) is not one glTF defines")
+            }
+            let times: [Float], values: [[Float]]
+            do {
+                times = try readFloats(sampler.input, components: 1).map { $0[0] }
+                values = try readFloats(sampler.output, components: path == "rotation" ? 4 : 3)
+            } catch {
+                throw ClipProblem(reason: "its keys could not be read")
+            }
+            guard !times.isEmpty, values.count == times.count * (interpolation == "CUBICSPLINE" ? 3 : 1) else {
+                throw ClipProblem(reason: "\(joints.paths[joint]) has \(times.count) key times and \(values.count) values")
+            }
+            for (key, time) in times.enumerated() {
+                guard time.isFinite, key == 0 || time >= times[key - 1] else {
+                    throw ClipProblem(reason: "\(joints.paths[joint])'s key times are not in order")
+                }
+            }
+            tracks[path, default: [:]][joint] = Track(times: times, values: values, interpolation: interpolation)
+        }
+        let all = tracks.values.flatMap(\.values)
+        guard !all.isEmpty else { return nil }
+
+        // Every key any channel has; the instant before each step, so it stays a step; and thirty a second through a
+        // cubic curve, which bends between its keys where the engine's clips go straight.
+        var times = Set(all.flatMap(\.times))
+        let start = times.min()!, end = times.max()!
+        if all.contains(where: { $0.interpolation == "CUBICSPLINE" }), end > start {
+            let steps = Int(((end - start) * 30).rounded(.up))
+            for step in 0...steps { times.insert(start + (end - start) * Float(step) / Float(steps)) }
+        }
+        let steps = Set(all.filter { $0.interpolation == "STEP" }.flatMap { $0.times.dropFirst() })
+        var keys: [(time: Float, before: Bool)] = []
+        for time in times.sorted() {
+            if steps.contains(time) { keys.append((time, true)) }
+            keys.append((time, false))
+        }
+
+        let clipJoints = Set(all.isEmpty ? [] : tracks.values.flatMap(\.keys)).sorted()
+        let folded = clipJoints.contains { joints.between[$0] != matrix_identity_float4x4 }
+        var poses: [[JointTransform]] = []
+        for key in keys {
+            poses.append(clipJoints.map { joint in
+                var t = joints.rest[joint]
+                if let v = tracks["translation"]?[joint]?.sample(at: key.time, before: key.before) {
+                    t.translation = SIMD3(v[0], v[1], v[2])
+                }
+                if let v = tracks["rotation"]?[joint]?.sample(at: key.time, before: key.before) {
+                    let q = simd_quatf(vector: SIMD4(v[0], v[1], v[2], v[3]))
+                    t.rotation = simd_length(q.vector) > 0 ? simd_normalize(q) : joints.rest[joint].rotation
+                }
+                if let v = tracks["scale"]?[joint]?.sample(at: key.time, before: key.before) {
+                    t.scale = SIMD3(v[0], v[1], v[2])
+                }
+                // What lies above a joint that is not a joint still moves it; almost always nothing does.
+                let between = joints.between[joint]
+                return between == matrix_identity_float4x4 ? t : JointTransform(matrix: between * t.matrix)
+            })
+        }
+        let keyTimes = keys.map { $0.time - start }
+        func track<V>(_ channel: String, _ value: (JointTransform) -> V) throws -> JointTrack<V> {
+            guard folded || tracks[channel] != nil else { return .empty(jointCount: clipJoints.count) }
+            return try JointTrack(times: keyTimes, values: poses.flatMap { $0.map(value) }, jointCount: clipJoints.count)
+        }
+        do {
+            return try AnimationClip(name: name, jointPaths: clipJoints.map { joints.paths[$0] },
+                                     translation: track("translation", \.translation),
+                                     rotation: track("rotation", \.rotation),
+                                     scale: track("scale", \.scale))
+        } catch {
+            throw ClipProblem(reason: "\(error)")
         }
     }
 }
@@ -723,6 +1177,7 @@ private nonisolated struct Document: Decodable {
     let samplers: [Sampler]?
     let images: [Image]?
     let skins: [Skin]?
+    let animations: [Animation]?
     let accessors: [Accessor]?
     let bufferViews: [BufferView]?
     let buffers: [Buffer]?
@@ -819,6 +1274,17 @@ private nonisolated struct Document: Decodable {
     struct Sampler: Decodable { let magFilter: Int?; let minFilter: Int?; let wrapS: Int?; let wrapT: Int? }
     struct Image: Decodable { let uri: String?; let bufferView: Int?; let mimeType: String?; let name: String? }
     struct Skin: Decodable { let inverseBindMatrices: Int?; let joints: [Int] }
+    struct Animation: Decodable {
+        let name: String?
+        let channels: [Channel]
+        let samplers: [Sampler]
+        struct Channel: Decodable {
+            let sampler: Int
+            let target: Target
+            struct Target: Decodable { let node: Int?; let path: String }
+        }
+        struct Sampler: Decodable { let input: Int; let output: Int; let interpolation: String? }
+    }
     struct Accessor: Decodable {
         let bufferView: Int?
         let byteOffset: Int?

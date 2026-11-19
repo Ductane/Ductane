@@ -98,6 +98,38 @@ public nonisolated struct Skeleton: Sendable {
                                                        bind: bindTransforms.count)
         }
 
+        var inverses: [simd_float4x4] = []
+        inverses.reserveCapacity(bindTransforms.count)
+        for (index, bind) in bindTransforms.enumerated() {
+            // `simd_inverse` of a singular matrix returns NaN rather than failing, and a NaN
+            // skinning matrix makes every vertex it touches vanish — the mesh is simply not drawn,
+            // with nothing logged. Catch it where the name of the joint is still known.
+            guard abs(simd_determinant(bind)) > 1e-12 else {
+                throw SkeletonError.singularBindTransform(joint: jointPaths[index])
+            }
+            inverses.append(simd_inverse(bind) * geometryBindTransform)
+        }
+
+        try self.init(jointPaths: jointPaths, restTransforms: restTransforms, inverseBindTransforms: inverses)
+    }
+
+    /// The same, from the inverse bind transforms themselves — glTF's form, which a file stores already inverted.
+    ///
+    /// **Not inverted twice to reach the public initialiser**: an inverse bind matrix carrying a quantized file's tiny
+    /// scale comes back from two inversions changed in its last digits. Checked only for what makes skinning draw
+    /// nothing: a matrix that is not finite, or flat.
+    init(jointPaths: [String], restTransforms: [simd_float4x4], inverseBindTransforms: [simd_float4x4]) throws {
+        guard !jointPaths.isEmpty else { throw SkeletonError.emptySkeleton }
+        guard jointPaths.count == restTransforms.count, jointPaths.count == inverseBindTransforms.count else {
+            throw SkeletonError.transformCountMismatch(joints: jointPaths.count,
+                                                       rest: restTransforms.count,
+                                                       bind: inverseBindTransforms.count)
+        }
+        for (index, inverse) in inverseBindTransforms.enumerated() {
+            let d = simd_determinant(inverse)
+            guard d.isFinite, d != 0 else { throw SkeletonError.singularBindTransform(joint: jointPaths[index]) }
+        }
+
         var indexByPath: [String: Int] = [:]
         indexByPath.reserveCapacity(jointPaths.count)
         for (index, path) in jointPaths.enumerated() { indexByPath[path] = index }
@@ -123,22 +155,10 @@ public nonisolated struct Skeleton: Sendable {
             parents.append(parent)
         }
 
-        var inverses: [simd_float4x4] = []
-        inverses.reserveCapacity(bindTransforms.count)
-        for (index, bind) in bindTransforms.enumerated() {
-            // `simd_inverse` of a singular matrix returns NaN rather than failing, and a NaN
-            // skinning matrix makes every vertex it touches vanish — the mesh is simply not drawn,
-            // with nothing logged. Catch it where the name of the joint is still known.
-            guard abs(simd_determinant(bind)) > 1e-12 else {
-                throw SkeletonError.singularBindTransform(joint: jointPaths[index])
-            }
-            inverses.append(simd_inverse(bind) * geometryBindTransform)
-        }
-
         self.jointPaths = jointPaths
         self.parentIndices = parents
         self.restTransforms = restTransforms
-        self.inverseBindTransforms = inverses
+        self.inverseBindTransforms = inverseBindTransforms
     }
 
     /// The index of a joint by its full path, or `nil` if the rig has no such joint.

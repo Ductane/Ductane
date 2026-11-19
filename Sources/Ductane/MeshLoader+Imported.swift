@@ -36,7 +36,9 @@ import simd
 /// double-sidedness, a normal map's scale, occlusion strength, wrapping and filtering.
 nonisolated extension MeshLoader {
 
-    static func makeAsset(_ model: ImportedModel, allocator: MDLMeshBufferAllocator,
+    /// - Parameter influences: per mesh of `model`, each vertex's joints and weights, for a skinned character — given to
+    ///   Model I/O as its joint attributes, so ``SkinnedGeometry`` lays them out as it lays out a USD file's.
+    static func makeAsset(_ model: ImportedModel, influences: [[Influence]] = [], allocator: MDLMeshBufferAllocator,
                           reportingTo report: ((String) -> Void)?)
         -> (asset: MDLAsset, materials: [ObjectIdentifier: [ImportedMaterial?]]) {
         let asset = MDLAsset(bufferAllocator: allocator)
@@ -51,7 +53,7 @@ nonisolated extension MeshLoader {
         let modelMaterials = model.materials.map { makeMaterial($0, file: file) }
         var importedMaterials: [ObjectIdentifier: [ImportedMaterial?]] = [:]
 
-        for mesh in model.meshes {
+        for (meshIndex, mesh) in model.meshes.enumerated() {
             let count = mesh.positions.count
             guard count > 0, !mesh.submeshes.isEmpty,
                   mesh.submeshes.allSatisfy({ $0.indices.allSatisfy { Int($0) < count } }) else { continue }
@@ -79,6 +81,17 @@ nonisolated extension MeshLoader {
             if mesh.colors.count == count {
                 add(MDLVertexAttributeColor, .float4,
                     drawn.source.flatMap { let c = mesh.colors[$0]; return [c.x, c.y, c.z, c.w] }, width: 4)
+            }
+            if let skin = influences.indices.contains(meshIndex) ? influences[meshIndex] : nil, skin.count == count {
+                let index = buffers.count
+                descriptor.addOrReplaceAttribute(MDLVertexAttribute(name: MDLVertexAttributeJointIndices, format: .uShort4,
+                                                                    offset: 0, bufferIndex: index))
+                descriptor.layouts[index] = MDLVertexBufferLayout(stride: 8)
+                buffers.append(drawn.source.map { skin[$0].joints }.withUnsafeBytes {
+                    allocator.newBuffer(with: Data($0), type: .vertex)
+                })
+                add(MDLVertexAttributeJointWeights, .float4,
+                    drawn.source.flatMap { let w = skin[$0].weights; return [w.x, w.y, w.z, w.w] }, width: 4)
             }
 
             let submeshes = zip(mesh.submeshes, drawn.indices).map { submesh, indices in

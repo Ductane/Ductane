@@ -15,6 +15,9 @@ public nonisolated enum RigLoaderError: Error, CustomStringConvertible, Sendable
     case conflictingGeometryBindTransforms(String)
     /// A clip in the file has keys of the wrong shape — see ``AnimationClipError``.
     case malformedClip(String, clip: String, AnimationClipError)
+    /// The file is there and could not be read — a glTF file that is damaged, or requires an extension the engine
+    /// does not read. `reason` says which file and why.
+    case unreadable(String, reason: String)
 
     public var description: String {
         switch self {
@@ -23,6 +26,7 @@ public nonisolated enum RigLoaderError: Error, CustomStringConvertible, Sendable
         case .conflictingGeometryBindTransforms(let name):
             "\(name) binds several meshes to one skeleton with different geometry bind transforms"
         case .malformedClip(let name, let clip, let error): "\(name): clip '\(clip)' is malformed — \(error)"
+        case .unreadable(_, let reason): reason
         }
     }
 }
@@ -72,7 +76,13 @@ public nonisolated struct Rig: Sendable {
     }
 }
 
-/// Reads a skeleton and its clips out of a USD file.
+/// Reads a skeleton and its clips out of a USD or glTF file.
+///
+/// **USD through Model I/O, glTF (`.gltf`, `.glb`) through the engine's own reader** — compressed with Draco or meshopt,
+/// quantized, or plain. Either way the rig comes out the same: joints named by path, parent first, rest transforms
+/// joint-local, and a character whose rig is in centimetres under a parent scaled by 0.01 keeps both, the scale in
+/// ``Rig/nodeTransform``. How glTF's different way of saying a rig is settled is written down on `GLTFCharacter`, in
+/// `GLTFReader.swift`.
 ///
 /// ### Why this is separate from ``MeshLoader``, and not merely tidier
 ///
@@ -112,6 +122,9 @@ public nonisolated enum RigLoader {
         case clipDrivesNoJoints(file: String, clip: String)
         /// The clip file could not be loaded; the rest of the rig was.
         case clipFileFailed(file: String, error: RigLoaderError)
+        /// A clip in a glTF file was left out, and the rest loaded: a sampler whose keys cannot be read, keys and values
+        /// that do not pair up, or key times out of order.
+        case clipDropped(file: String, clip: String, reason: String)
 
         public var description: String {
             switch self {
@@ -119,6 +132,7 @@ public nonisolated enum RigLoader {
             case .clipDrivesNoJoints(let file, let clip):
                 "\(file): clip '\(clip)' drives none of this rig's joints — dropped"
             case .clipFileFailed(let file, let error): "\(file): \(error)"
+            case .clipDropped(let file, let clip, let reason): "\(file): clip '\(clip)' left out — \(reason)"
             }
         }
     }
@@ -128,14 +142,43 @@ public nonisolated enum RigLoader {
     /// the extension is the format.
     public static func load(named name: String,
                             withExtension fileExtension: String,
-                            bundle: Bundle) throws -> Rig {
-        try load(url: url(of: name, withExtension: fileExtension, in: bundle))
+                            bundle: Bundle,
+                            reportingTo report: (Warning) -> Void = { _ in }) throws -> Rig {
+        try load(url: url(of: name, withExtension: fileExtension, in: bundle), reportingTo: report)
     }
 
     /// The same, from a file anywhere on disk — see ``MeshLoader/load(url:device:vertexDescriptor:semantics:reportingTo:)``
     /// for why a bundle is not enough.
-    public static func load(url: URL) throws -> Rig {
-        try rig(from: openAsset(at: url), named: url.lastPathComponent)
+    ///
+    /// - Parameter report: told of a clip in a glTF file that was left out — see ``Warning/clipDropped(file:clip:reason:)``.
+    ///   A malformed clip in a USD file throws ``RigLoaderError/malformedClip(_:clip:_:)``, as it always has.
+    public static func load(url: URL, reportingTo report: (Warning) -> Void = { _ in }) throws -> Rig {
+        if isGLTF(url) {
+            let character = try gltfCharacter(at: url, withMeshes: false, reportingTo: report)
+            guard let skeleton = character.skeleton else { throw RigLoaderError.noSkeleton(url.lastPathComponent) }
+            return Rig(skeleton: skeleton, clips: character.clips, nodeTransform: character.nodeTransform)
+        }
+        return try rig(from: openAsset(at: url), named: url.lastPathComponent)
+    }
+
+    static func isGLTF(_ url: URL) -> Bool { ImportedModel.gltfFileExtensions.contains(url.pathExtension.lowercased()) }
+
+    /// A glTF character read, its dropped clips reported, and its errors said as the rig loader's.
+    static func gltfCharacter(at url: URL, withMeshes: Bool, reportingTo report: (Warning) -> Void) throws -> GLTFCharacter {
+        let name = url.lastPathComponent
+        guard FileManager.default.fileExists(atPath: url.path) else { throw RigLoaderError.assetNotFound(url.path) }
+        let character: GLTFCharacter
+        do {
+            character = try GLTFReader.character(url: url, withMeshes: withMeshes, reportingTo: nil)
+        } catch let error as GLTFError {
+            throw RigLoaderError.unreadable(name, reason: error.description)
+        } catch let error as SkeletonError {
+            throw RigLoaderError.unreadable(name, reason: "\(name): \(error)")
+        }
+        for dropped in character.droppedClips {
+            report(.clipDropped(file: name, clip: dropped.clip, reason: dropped.reason))
+        }
+        return character
     }
 
     /// A rig from one file and its animations from others, all by URL.
@@ -147,7 +190,7 @@ public nonisolated enum RigLoader {
     public static func load(url: URL,
                             clipURLs: [URL],
                             reportingTo report: (Warning) -> Void = { _ in }) throws -> Rig {
-        let rig = try load(url: url)
+        let rig = try load(url: url, reportingTo: report)
         return adding(clipURLs.map { (name: $0.deletingPathExtension().lastPathComponent, url: $0) },
                       to: rig, reportingTo: report)
     }
@@ -169,7 +212,7 @@ public nonisolated enum RigLoader {
                             clipFiles: [String],
                             bundle: Bundle,
                             reportingTo report: (Warning) -> Void = { _ in }) throws -> Rig {
-        let rig = try load(named: name, withExtension: fileExtension, bundle: bundle)
+        let rig = try load(named: name, withExtension: fileExtension, bundle: bundle, reportingTo: report)
         var files: [(name: String, url: URL)] = []
         for file in clipFiles {
             guard let url = bundle.url(forResource: file, withExtension: fileExtension) else {
@@ -190,12 +233,13 @@ public nonisolated enum RigLoader {
         for file in files {
             let loaded: [AnimationClip]
             do {
-                loaded = try clips(url: file.url)
+                loaded = try clips(url: file.url, reportingTo: report)
             } catch let error as RigLoaderError {
                 report(.clipFileFailed(file: file.name, error: error))
                 continue
             } catch {
-                report(.clipFileFailed(file: file.name, error: .assetNotFound(file.url.path)))
+                report(.clipFileFailed(file: file.name, error: .unreadable(file.url.lastPathComponent,
+                                                                           reason: "\(file.url.lastPathComponent): \(error)")))
                 continue
             }
             guard !loaded.isEmpty else {
@@ -232,15 +276,20 @@ public nonisolated enum RigLoader {
     /// > **The mesh in those files is still parsed**, because Model I/O offers no way to open an
     /// > asset's animations alone. What this avoids is the expensive half — no vertex descriptor and
     /// > no buffer allocator, so nothing is laid out, converted or uploaded to a GPU.
+    ///
+    /// **A glTF file's clips name their joints by the skin's**, as the base file's rig does; a glTF file with no skin —
+    /// animation only — names, as joints, the nodes its clips move and the nodes between them.
     public static func clips(named name: String,
                              withExtension fileExtension: String,
-                             bundle: Bundle) throws -> [AnimationClip] {
-        try clips(url: url(of: name, withExtension: fileExtension, in: bundle))
+                             bundle: Bundle,
+                             reportingTo report: (Warning) -> Void = { _ in }) throws -> [AnimationClip] {
+        try clips(url: url(of: name, withExtension: fileExtension, in: bundle), reportingTo: report)
     }
 
     /// The same, from a file anywhere on disk.
-    public static func clips(url: URL) throws -> [AnimationClip] {
-        try clips(in: openAsset(at: url), named: url.lastPathComponent)
+    public static func clips(url: URL, reportingTo report: (Warning) -> Void = { _ in }) throws -> [AnimationClip] {
+        if isGLTF(url) { return try gltfCharacter(at: url, withMeshes: false, reportingTo: report).clips }
+        return try clips(in: openAsset(at: url), named: url.lastPathComponent)
     }
 
     private static func url(of name: String, withExtension fileExtension: String, in bundle: Bundle) throws -> URL {
