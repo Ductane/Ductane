@@ -905,8 +905,8 @@ private nonisolated extension Reader {
                     // A joint index must be a whole number naming one of the skin's joints; a float accessor or a
                     // damaged one may hold anything, which converted unchecked would stop the program.
                     let value = joints[vertex][lane]
-                    guard value.isFinite, value >= 0, value < Float(remap.count), let index = Int(exactly: value.rounded())
-                    else { throw GLTFError.unreadable(file: file) }
+                    guard value.isFinite, value == value.rounded(), let index = Int(exactly: value),
+                          remap.indices.contains(index) else { throw GLTFError.unreadable(file: file) }
                     lanes.append((remap[index], weights[vertex][lane]))
                 }
             }

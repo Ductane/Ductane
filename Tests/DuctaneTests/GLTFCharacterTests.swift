@@ -443,6 +443,19 @@ struct GLTFCharacterTests {
             try SkinnedModel.read(url: notANumber.write(to: folder, name: "nan"), vertexDescriptor: layout, semantics: semantics)
         }
 
+        // Not a whole number, and rounding it would name a joint the two-joint skin does not have.
+        var fraction = Self.centimetreRig(animations: [])
+        meshes = fraction.json["meshes"] as! [[String: Any]]
+        primitives = meshes[0]["primitives"] as! [[String: Any]]
+        attributes = primitives[0]["attributes"] as! [String: Int]
+        attributes["JOINTS_0"] = fraction.accessor([0, 0, 0, 0, 1.6, 0, 0, 0, 1, 0, 0, 0], type: "VEC4")
+        primitives[0]["attributes"] = attributes
+        meshes[0]["primitives"] = primitives
+        fraction.json["meshes"] = meshes
+        #expect(throws: RigLoaderError.self) {
+            try SkinnedModel.read(url: fraction.write(to: folder, name: "fraction"), vertexDescriptor: layout, semantics: semantics)
+        }
+
         // The child joint and its parent both outside the scene, the child first: no order puts them parent first.
         var outside = Builder()
         outside.append("nodes", ["name": "Hand"])
