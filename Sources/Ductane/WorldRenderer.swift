@@ -113,6 +113,12 @@ public final class WorldRenderer: GameLoop {
         /// How far each lower-detail level strays, in the prop's metres — the worst of its meshes'. Level `i + 1`'s
         /// is `detailErrors[i]`; empty when the prop has none (Ductane's `MeshDetail`), or its own levels.
         let detailErrors: [Float]
+        /// **Drawn all in cut-out cards** — every submesh of its finest meshes clips against its texture — the shape half
+        /// of telling ground cover (``GroundCover/byShape(size:cutOut:)``).
+        var isCutOut: Bool {
+            let cutoffs = meshes.flatMap(\.cutoffs)
+            return !cutoffs.isEmpty && cutoffs.allSatisfy { $0 > 0 }
+        }
         /// **The prop's own coarser levels** (``PropLevels``), finest first: level `i + 1` draws `levels[i]` whole.
         /// When there are any, they are the levels, chosen by size on screen, and none are made by simplifying it.
         var levels: [[ShownMesh]] = []
@@ -2466,6 +2472,8 @@ public final class WorldRenderer: GameLoop {
                                  index: 4)
         encoder.setDepthStencilState(depthState)
         encoder.setFrontFacing(.counterClockwise)
+        solidForReflections = waterReflects ? opaque : nil
+        defer { solidForReflections = nil }
         encodeOverSolid(into: encoder, solidDepth: opaque.depth)
     }
 
@@ -3097,7 +3105,20 @@ public final class WorldRenderer: GameLoop {
         let placed = prepare(placedCopies ?? gatherPlacedCopies(), settings: settings, view: placedTransforms,
                              shadows: placedShadowTransforms, hidden: [])
         let scattered = scatteredCopies ?? gatherScatteredCopies()
-        let copies = prepare(scattered, settings: settings, view: scatterTransforms, shadows: shadowTransforms,
+        // **The player's draw distance and grass** (`GraphicsSettings.drawDistance`, `plantDensity`) are the scattered
+        // copies'. A copy is drawn to where it shrinks to ``smallestDrawn`` pixels — each kind's own distance, set by its
+        // size — so dividing that by the draw distance brings every kind in by the same share, grass first in metres
+        // because it is smallest. Ground cover (`WorldScene.isGroundCover`) is thinned to the plant density.
+        let shown = graphicsSettings.clamped
+        var scatteredSettings = settings
+        scatteredSettings.smallestDrawn = Self.smallestDrawn / shown.drawDistance
+        if shown.plantDensity < 1 {
+            scatteredSettings.density = shown.plantDensity
+            scatteredSettings.thinned = zip(scattered.props, scattered.urls).map { prop, url in
+                scene.isGroundCover(url, size: prop.bounds.size, cutOut: prop.isCutOut)
+            }
+        }
+        let copies = prepare(scattered, settings: scatteredSettings, view: scatterTransforms, shadows: shadowTransforms,
                              hidden: hidesScattered.map { hides in Set(scattered.index.compactMap { hides($0.key) ? $0.value : nil }) } ?? [])
         sortSeeThrough()
         // The shadows, per cascade: solid submeshes and cut-out ones apart.
@@ -3416,9 +3437,19 @@ public final class WorldRenderer: GameLoop {
     /// **Whether a liquid is in view this frame** — then the scene is drawn in two passes, the second reading the
     /// first's depth (``wantsOpaqueTextures``); otherwise in one, as before liquids, at no cost.
     private var liquidsInView = false
-    public var wantsOpaqueTextures: Bool { liquidsInView || (drawsEffects && effects.softens) }
+    public var wantsOpaqueTextures: Bool { liquidsInView || (drawsEffects && effects.softens) || waterReflects }
     /// Only the solid depth is read — by the liquids and the soft particles — so the colour is not copied.
-    public var wantsOpaqueColour: Bool { false }
+    public var wantsOpaqueColour: Bool { waterReflects }
+
+    /// **Whether the water mirrors the scene this frame** (``GraphicsSettings/reflections``): reflections on and water in
+    /// the scene. Then the solid pass's colour is kept as well as its depth, and the water and streams march across it
+    /// (`reflectedScene` in `WorldShaders.metal`); off, they reflect the sky alone, at no cost. About 2–4 ms with a pond
+    /// filling a large view.
+    public var waterReflects: Bool {
+        graphicsSettings.reflections && (!scene.waters.isEmpty || !scene.streams.isEmpty)
+    }
+    /// The solid pass's colour and depth while the second pass draws, for the water to reflect.
+    private var solidForReflections: OpaqueTextures?
 
     /// A frame's liquid uniforms, one slot per look per frame in flight.
     private lazy var liquidBuffer: MTLBuffer = {
@@ -3865,7 +3896,8 @@ public final class WorldRenderer: GameLoop {
             inverseViewProjection: viewProjection.inverse,
             // w: 1 while the grid is shown (``showsGrid``) — the ground's lines read it (`propFragment`).
             cameraPosition: SIMD4(camera.eye, showsGrid ? 1 : 0),
-            sunDirection: SIMD4(light.direction, 0),
+            // w: the near plane while the water reflects the scene, read by `reflectedScene`; 0, the sky alone.
+            sunDirection: SIMD4(light.direction, waterReflects ? camera.projectionMatrix(aspectRatio: aspectRatio).columns.3.z : 0),
             sunColour: SIMD4(light.colour, 0),
             skyColour: SIMD4(light.skyLight, 0),
             horizonColour: SIMD4(light.horizon, 0),
@@ -3963,6 +3995,7 @@ public final class WorldRenderer: GameLoop {
             buffer.contents().copyMemory(from: $0.baseAddress!, byteCount: count * MemoryLayout<WaterCorner>.stride)
         }
         argumentTable.setAddress(buffer.gpuAddress, index: 0)
+        bindSolidForReflections()
         encoder.setRenderPipelineState(waterPipeline)
         encoder.setDepthStencilState(waterDepthState)
         defer {
@@ -3974,6 +4007,33 @@ public final class WorldRenderer: GameLoop {
             baseColour: .zero, emissive: .zero, params: .zero)) else { return }
         encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: count)
     }
+
+    /// The solid pass's colour and depth where the water shaders read them (3 and 6), while it reflects the scene.
+    /// **Always something there**: the shaders declare both, and Metal's validation refuses a draw whose texture was never
+    /// set, even one the shader does not sample — with reflections off a pixel each stands in, never read.
+    private func bindSolidForReflections() {
+        if let solid = solidForReflections {
+            argumentTable.setTexture(solid.colour.gpuResourceID, index: 3)
+            argumentTable.setTexture(solid.depth.gpuResourceID, index: 6)
+        } else if let (colour, depth) = reflectionStandIns {
+            argumentTable.setTexture(colour.gpuResourceID, index: 3)
+            argumentTable.setTexture(depth.gpuResourceID, index: 6)
+        }
+    }
+
+    /// One pixel of colour and one of depth, for the water to be bound to while it reflects only the sky.
+    private lazy var reflectionStandIns: (MTLTexture, MTLTexture)? = {
+        let colour = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: 1, height: 1, mipmapped: false)
+        colour.usage = .shaderRead
+        colour.storageMode = .private
+        let depth = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .depth32Float, width: 1, height: 1, mipmapped: false)
+        depth.usage = .shaderRead
+        depth.storageMode = .private
+        guard let c = device.makeTexture(descriptor: colour), let d = device.makeTexture(descriptor: depth) else { return nil }
+        engine.residencySet.addAllocations([c, d])
+        engine.commitResidency()
+        return (c, d)
+    }()
 
     /// **Every stream's surface**, a ribbon down its course, flowing (``WorldFile/Stream``): drawn like water,
     /// over the finished opaque scene, each corner carrying how far along it is, the way it runs, how white and how fast.
@@ -4007,6 +4067,7 @@ public final class WorldRenderer: GameLoop {
             buffer.contents().copyMemory(from: $0.baseAddress!, byteCount: count * MemoryLayout<StreamVertex>.stride)
         }
         argumentTable.setAddress(buffer.gpuAddress, index: 0)
+        bindSolidForReflections()
         encoder.setRenderPipelineState(streamPipeline)
         encoder.setDepthStencilState(waterDepthState)
         defer {

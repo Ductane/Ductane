@@ -89,19 +89,24 @@ public nonisolated struct GraphicsSettings: Equatable, Sendable, Codable {
     }
 
     public var shadows: Shadows = .high
-    /// How far scattered things are drawn, as a share of each kind's own distance (``drawDistanceRange``).
+    /// How far scattered things are drawn, as a share of each kind's own distance (``drawDistanceRange``) — the distance
+    /// at which it shrinks to a few pixels across. ``WorldRenderer`` applies it to its scattered copies.
     public var drawDistance: Float = 1
     /// The share of thin ground cover drawn — grass, flowers, crops (``plantDensityRange``, ``keeps(_:atDensity:)``).
-    /// Trees and bushes stay whole: thinning them changes the world, not its cost.
+    /// Trees and bushes stay whole: thinning them changes the world, not its cost. ``WorldRenderer`` thins the props a
+    /// scene counts as ground cover (``WorldScene/isGroundCover(_:size:cutOut:)``).
     public var plantDensity: Float = 1
     public var renderScale: RenderScale = .automatic
-    /// Frames a second asked of the display (``frameRates``) — ``frameRateRange``. 60 unless a game starts elsewhere.
+    /// Frames a second asked of the display (``frameRates``) — ``frameRateRange``. 60 unless a game starts elsewhere; a
+    /// display link made without settings asks for the display's best instead (``FrameRenderer/makeDisplayLink(for:frameRateRange:)``).
     public var frameRate: Int = 60
-    /// Samples per pixel in the scene (``FrameRenderer/sampleCount``): 1 is none, 4 smooths every edge.
+    /// Samples per pixel in the scene (``FrameRenderer/sampleCount``): 1 is none, 4 smooths every edge. A renderer starts
+    /// at 1 until settings are applied (``FrameRenderer/apply(_:automaticScaling:)``), which is what its pipelines are built for.
     public var antiAliasing: Int = 4
     /// **Whether water and the like reflect the world** (2026-10-28) — screen-space reflections, read from the solid scene
     /// (``OpaqueTextures``), as ESO's and FFXIV's water settings switch them. A game that has none ignores it. About 2 ms
-    /// at 1960×1490 with a pond filling the view; off, a surface reflects only the sky's gradient.
+    /// at 1960×1490 with a pond filling the view; off, a surface reflects only the sky's gradient. ``WorldRenderer``'s water
+    /// and streams follow it (``WorldRenderer/waterReflects``).
     public var reflections = true
     public var textureQuality: TextureQuality = .full
     /// **Whether lying snow has depth on the ground where a world gives it some** (``Weather/snowDepth``) — off, the snow
@@ -239,10 +244,7 @@ public nonisolated struct GraphicsSettings: Equatable, Sendable, Codable {
     /// and every run — a hash of the index, not a random draw — so a meadow thins evenly and nothing flickers; and
     /// lowering the density only takes copies away, never swaps one for another.
     public static func keeps(_ index: Int, atDensity density: Float) -> Bool {
-        guard density < 1 else { return true }
-        // Fibonacci hashing: an index's fraction of the golden ratio, spread evenly over 0..<1.
-        let f = Double(index) * 0.618_033_988_749_894_9
-        return Float(f - f.rounded(.down)) < density
+        WorldCopyField.keeps(index, atDensity: density)
     }
 }
 

@@ -197,6 +197,30 @@ struct SoundscapeTests {
         scape.update(listener: point, forward: SIMD3(0, 0, -1), up: SIMD3(0, 1, 0), elapsed: seconds)
     }
 
+    /// The world's music level was written over the player's volume, so the music slider stopped working the moment a
+    /// world with music was shown; and pausing stopped the score, so resuming started it from the top.
+    @Test("A world's music level is a mix under the player's volume, and a pause holds it in place")
+    func worldMusicMixesAndHolds() async throws {
+        let audio = try engine()
+        let music = MusicPlayer(volume: 0.6)
+        let scape = Soundscape(audio: audio, music: music)
+        let sounds = WorldFile.Sounds(files: ["score.m4a"], music: .init(tracks: [0], volume: 0.3))
+        await scape.play(sounds) { URL(filePath: "/nonexistent/\($0)") }
+        #expect(abs(music.volume - 0.6) < 1e-6, "the world's level replaced the player's")
+        #expect(abs(music.mix - 0.3) < 1e-6 && abs(music.heard - 0.18) < 1e-6)
+        let playlist = music.playlist
+        #expect(playlist.count == 1)
+
+        scape.pause()
+        #expect(music.isHeld && music.playlist == playlist, "a pause stopped the score instead of holding it")
+        scape.resume()
+        #expect(!music.isHeld && music.playlist == playlist)
+
+        scape.stop()
+        #expect(music.playlist.isEmpty && music.mix == 1 && !music.isHeld)
+        await music.settle()
+    }
+
     @Test("A world's loop starts as the listener comes within reach and stops once left behind")
     func pointsStartAndStop() async throws {
         let scape = try await world(WorldFile.Sounds(files: ["noise"], points: [.init(sound: 0, position: .zero, reach: 20)]))

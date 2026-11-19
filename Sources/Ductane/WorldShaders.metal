@@ -21,7 +21,7 @@ struct FrameUniforms {
     float4x4 viewProjection;
     float4x4 inverseViewProjection;
     float4   cameraPosition;   // xyz; w: 1 while the grid is shown (`WorldRenderer.showsGrid`)
-    float4   sunDirection;     // xyz, towards the sun; w unused
+    float4   sunDirection;     // xyz, towards the sun; w: the near plane while water reflects the scene (`GraphicsSettings.reflections`), 0 for the sky alone
     float4   sunColour;        // rgb radiance; w unused
     float4   skyColour;        // rgb, the zenith and the ambient from above
     float4   horizonColour;    // rgb
@@ -1160,12 +1160,74 @@ vertex WaterOut waterVertex(uint id [[vertex_id]],
     return out;
 }
 
+/// **What water mirrors** (`GraphicsSettings.reflections`): the ray off the surface marched across the solid scene as
+/// drawn (Ductane's `OpaqueTextures`), in steps that lengthen with distance, until it passes behind something — then
+/// refined, and that pixel is what the water shows. Depth is reversed and infinite, so a depth `d` is the near plane over
+/// the distance. A ray that meets nothing takes the sky as drawn while it is still on screen, and `sky` where it has left
+/// it. Faded toward the screen's edges, where what would be reflected is not in the picture.
+///
+/// **Cheap where it can be**: steps start at a hundredth of the water's distance from the eye, the march gives up past
+/// 150 m, and a surface looked down on — where Fresnel shows almost none of the reflection (`worth` under 0.12) — takes
+/// `sky` without marching. With reflections off (`frame.sunDirection.w` 0) it is `sky`, as water was before.
+static float3 reflectedScene(float3 p, float3 r, float worth, float3 sky, constant FrameUniforms &frame,
+                             texture2d<float> colour, depth2d<float> depth) {
+    const float nearPlane = frame.sunDirection.w;
+    if (nearPlane <= 0.0 || worth < 0.12) return sky;
+    constexpr sampler linear(filter::linear, address::clamp_to_edge);
+    constexpr sampler nearest(filter::nearest, address::clamp_to_edge);
+    // Never down into the water: a ripple steep enough to send the ray under the surface still reflects the bank.
+    float3 dir = normalize(float3(r.x, max(r.y, 0.02), r.z));
+    auto project = [&](float distance, thread float &w) {
+        float4 clip = frame.viewProjection * float4(p + dir * distance, 1.0);
+        w = clip.w;
+        return float2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
+    };
+    auto edgeFade = [](float2 uv) {
+        float2 edge = smoothstep(0.0, 0.08, uv) * smoothstep(0.0, 0.08, 1.0 - uv);
+        return edge.x * edge.y;
+    };
+    float step = max(0.3, 0.015 * distance(p, frame.cameraPosition.xyz));
+    float t = step, previous = 0.0;
+    float2 lastUV = float2(-1.0);
+    for (int i = 0; i < 20 && t < 150.0; i++) {
+        float w;
+        float2 uv = project(t, w);
+        if (w <= nearPlane || any(uv < 0.0) || any(uv > 1.0)) break;
+        lastUV = uv;
+        float d = depth.sample(nearest, uv);
+        float behind = d > 0.0 ? w - nearPlane / d : -1.0;
+        if (behind > 0.0 && behind < max(step * 1.5, 0.3)) {
+            // Between the last step in front and this one behind: halve it four times.
+            float lo = previous, hi = t;
+            for (int k = 0; k < 4; k++) {
+                float mid = 0.5 * (lo + hi), wm;
+                float2 um = project(mid, wm);
+                float dm = depth.sample(nearest, um);
+                if (dm > 0.0 && wm > nearPlane / dm) { hi = mid; } else { lo = mid; }
+            }
+            float wh;
+            float2 hit = project(hi, wh);
+            return mix(sky, colour.sample(linear, hit).rgb, edgeFade(hit));
+        }
+        previous = t;
+        t += step;
+        step *= 1.25;
+    }
+    // Nothing solid in the way: the sky as drawn, while the ray is still on screen.
+    if (lastUV.x >= 0.0 && depth.sample(nearest, lastUV) <= 0.0) {
+        return mix(sky, colour.sample(linear, lastUV).rgb, edgeFade(lastUV));
+    }
+    return sky;
+}
+
 /// Water as an eye judges it: its own deep color looking down, the sky reflected looking across
 /// (Fresnel), and the sun's glint. **Flat, with no waves** — enough to read where the shore is and how
 /// the light falls on it; moving water is a look for later.
 fragment float4 waterFragment(WaterOut in [[stage_in]],
                               constant ObjectUniforms &object [[buffer(1)]],
                               constant FrameUniforms &frame [[buffer(2)]],
+                              texture2d<float> solidColour [[texture(3)]],
+                              depth2d<float> solidDepth [[texture(6)]],
                              texture3d<float> fogVolume [[texture(9)]]) {
     // A faint ripple in the normal, from the position alone, so the glint breaks up instead of being a disc.
     float2 p = in.worldPosition.xz;
@@ -1176,6 +1238,7 @@ fragment float4 waterFragment(WaterOut in [[stage_in]],
 
     float3 r = reflect(-v, n);
     float3 sky = mix(frame.horizonColour.rgb, frame.skyColour.rgb * 1.6, pow(saturate(r.y), 0.6));
+    sky = reflectedScene(in.worldPosition, r, fresnel, sky, frame, solidColour, solidDepth);
     float3 l = frame.sunDirection.xyz;
     float glint = pow(saturate(dot(r, l)), 600.0) * 6.0 * step(0.0, l.y);
 
@@ -1227,6 +1290,8 @@ vertex StreamOut streamVertex(uint id [[vertex_id]],
 fragment float4 streamFragment(StreamOut in [[stage_in]],
                                constant ObjectUniforms &object [[buffer(1)]],
                                constant FrameUniforms &frame [[buffer(2)]],
+                             texture2d<float> solidColour [[texture(3)]],
+                               depth2d<float> solidDepth [[texture(6)]],
                              texture3d<float> fogVolume [[texture(9)]]) {
     float t = object.params.x;
     float2 h = length(in.heading) > 1e-4 ? normalize(in.heading) : float2(0, 1);
@@ -1244,6 +1309,7 @@ fragment float4 streamFragment(StreamOut in [[stage_in]],
     float fresnel = 0.02 + 0.98 * pow(1.0 - saturate(dot(n, eye)), 5.0);
     float3 r = reflect(-eye, n);
     float3 sky = mix(frame.horizonColour.rgb, frame.skyColour.rgb * 1.6, pow(saturate(r.y), 0.6));
+    sky = reflectedScene(in.worldPosition, r, fresnel, sky, frame, solidColour, solidDepth);
     float3 l = frame.sunDirection.xyz;
     float glint = pow(saturate(dot(r, l)), 400.0) * 4.0 * step(0.0, l.y);
     float3 light = frame.sunColour.rgb * saturate(l.y) / M_PI_F + frame.skyColour.rgb;

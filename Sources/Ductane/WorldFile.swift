@@ -43,6 +43,10 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
     public var foliage: [Int: Foliage]
     /// **How each prop moves in the wind** (``Sway``), by index into ``props`` — only the props that move.
     public var sway: [Int: Sway]
+    /// **Ground cover a person decided**, by index into ``props``: true for a prop that is ground cover whatever its shape,
+    /// false for one that is not. The rest are judged by their shape (``GroundCover/byShape(size:cutOut:)``). Ground cover
+    /// is what a player's ``GraphicsSettings/plantDensity`` thins.
+    public var groundCover: [Int: Bool]
     /// **The props a scan finds** (``WaymarkScan``), by index into ``props``, each with the kind it is found as — a
     /// vending machine, a supply crate, a door: every placement of the prop is outlined and labelled by that kind's icon
     /// (``Waymark/Look/kinds``).
@@ -79,7 +83,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
     public var weather: Weather?
 
     public init(name: String, props: [String], walkedThrough: [Int] = [], collisionShapes: [Int: String] = [:],
-                foliage: [Int: Foliage] = [:], sway: [Int: Sway] = [:], found: [Int: String] = [:], liquids: [Liquid] = [], characters: [Int] = [], effectMeshes: [String: Int] = [:], grime: [Grime] = [],
+                foliage: [Int: Foliage] = [:], sway: [Int: Sway] = [:], groundCover: [Int: Bool] = [:], found: [Int: String] = [:], liquids: [Liquid] = [], characters: [Int] = [], effectMeshes: [String: Int] = [:], grime: [Grime] = [],
                 placements: [Placement], ground: Ground? = nil, sky: Sky = Sky(), lights: [Light] = [],
                 waters: [Water] = [], streams: [Stream] = [], effects: [Effect] = [], markers: [Marker] = [],
                 boundary: WorldBoundary? = nil, waymark: Waymark.Look? = nil, sounds: Sounds? = nil,
@@ -90,6 +94,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         self.collisionShapes = collisionShapes
         self.foliage = foliage
         self.sway = sway
+        self.groundCover = groundCover
         self.found = found
         self.liquids = liquids
         self.characters = characters
@@ -120,6 +125,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         collisionShapes = try c.decodeIfPresent([Int: String].self, forKey: .collisionShapes) ?? [:]
         foliage = ((try? c.decodeIfPresent([Int: Foliage].self, forKey: .foliage)) ?? nil) ?? [:]
         sway = ((try? c.decodeIfPresent([Int: Sway].self, forKey: .sway)) ?? nil) ?? [:]
+        groundCover = ((try? c.decodeIfPresent([Int: Bool].self, forKey: .groundCover)) ?? nil) ?? [:]
         found = ((try? c.decodeIfPresent([Int: String].self, forKey: .found)) ?? nil) ?? [:]
         liquids = try c.decodeIfPresent([Liquid].self, forKey: .liquids) ?? []
         characters = try c.decodeIfPresent([Int].self, forKey: .characters) ?? []
@@ -140,7 +146,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case version, name, props, walkedThrough, collisionShapes, foliage, sway, found, liquids, characters, effectMeshes, grime, placements,
+        case version, name, props, walkedThrough, collisionShapes, foliage, sway, groundCover, found, liquids, characters, effectMeshes, grime, placements,
              ground, sky, lights, waters, streams, effects, markers, boundary, waymark, sounds,
              weather
     }
@@ -654,7 +660,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
 
     /// Reads a description, refusing one newer than this engine reads or one whose placements name props it lacks.
     /// **A description is data from anyone**: every index into ``props`` is checked — placements and what they wear,
-    /// characters, effect meshes, liquids, grime, collision shapes, what is walked through, foliage — the ground's grid kept to a
+    /// characters, effect meshes, liquids, grime, collision shapes, what is walked through, foliage, ground cover — the ground's grid kept to a
     /// size its files can hold, and every path it names kept inside its package, so nothing read from it traps, overflows
     /// or reaches outside.
     public static func read(_ data: Data) throws -> WorldFile {
@@ -665,7 +671,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         }
         let named = file.placements.flatMap { $0.materials.values.map(\.prop) } + file.characters + Array(file.effectMeshes.values)
             + file.liquids.map(\.prop) + file.grime.map(\.prop) + Array(file.collisionShapes.keys) + file.walkedThrough
-            + Array(file.foliage.keys) + Array(file.sway.keys) + Array(file.found.keys)
+            + Array(file.foliage.keys) + Array(file.sway.keys) + Array(file.groundCover.keys) + Array(file.found.keys)
         if let bad = named.first(where: { !file.props.indices.contains($0) }) { throw ReadError.badProp(bad) }
         if let ground = file.ground, !Ground.resolutions.contains(ground.resolution) {
             throw ReadError.badGround(ground.resolution)

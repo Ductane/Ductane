@@ -29,6 +29,34 @@ struct WorldFileTests {
         #expect(read.placements[0].transform.columns.3 == SIMD4(3, 0.5, -2, 1))
     }
 
+    /// A player's grass setting thins ground cover: what an editor's person decided comes through the file and wins over
+    /// the shape, and a prop nobody decided is judged by its shape.
+    @Test("Ground cover: decided by a person and carried by the file, else by its shape")
+    func groundCover() throws {
+        var file = WorldFile(name: "Meadow", props: ["grass.usda", "sunflowers.usda", "tree.usda"], groundCover: [1: true, 2: false],
+                             placements: [WorldFile.Placement(prop: 0, transform: matrix_identity_float4x4)])
+        #expect(try WorldFile.read(file.data()).groundCover == [1: true, 2: false])
+        // Written by something that knows nothing of it: none decided.
+        let older = try WorldFile.read(WorldFile(name: "w", props: [], placements: []).data())
+        #expect(older.groundCover.isEmpty)
+        // An index into props it lacks is refused, as every other.
+        file.groundCover = [7: true]
+        #expect(throws: WorldFile.ReadError.badProp(7)) { try WorldFile.read(file.data()) }
+
+        // The shape: all cut-out cards, and low or spread wide.
+        #expect(GroundCover.byShape(size: SIMD3(1, 0.5, 1), cutOut: true))
+        #expect(GroundCover.byShape(size: SIMD3(34, 2, 34), cutOut: true), "a wide patch")
+        #expect(!GroundCover.byShape(size: SIMD3(3, 6, 3), cutOut: true), "a tree's cards")
+        #expect(!GroundCover.byShape(size: SIMD3(1, 0.5, 1), cutOut: false), "a solid rock")
+
+        file.groundCover = [1: true, 2: false]
+        let urls = file.props.map { URL(filePath: "/w/\($0)") }
+        let scene = WorldScene(groundCover: [urls[1]: true, urls[2]: false])
+        #expect(scene.isGroundCover(urls[0], size: SIMD3(1, 0.4, 1), cutOut: true), "undecided: by its shape")
+        #expect(scene.isGroundCover(urls[1], size: SIMD3(1, 2.4, 1), cutOut: true), "decided over a shape just over the line")
+        #expect(!scene.isGroundCover(urls[2], size: SIMD3(1, 0.4, 1), cutOut: true), "decided against a low shape")
+    }
+
     @Test("Markers come through whole, and are found by kind in any case")
     func markers() throws {
         let read = try WorldFile.read(world().data())

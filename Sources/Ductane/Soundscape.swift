@@ -107,8 +107,11 @@ public final class Soundscape {
             let tracks = (sounds.music?.tracks ?? []).compactMap { file(of: $0).flatMap { urls[$0] } }
             if tracks.isEmpty {
                 if !music.playlist.isEmpty { music.stop() }
+                music.mix = 1
             } else {
-                music.volume = sounds.music?.volume ?? music.volume
+                // **The world's level is its mix, under the player's volume** — never in place of it, or the player's
+                // music slider would stop mattering the moment a world with music was shown.
+                music.mix = sounds.music?.volume ?? 1
                 if !isPaused { music.play(playlist: tracks) }
             }
         }
@@ -318,17 +321,19 @@ public final class Soundscape {
         + (dustBed == nil ? 0 : 1) }
 
     /// **Holds the world's sound** — under a menu, in a paused editor — stopping every loop and bed; ``resume()`` starts
-    /// what is in reach again. The music is held too, when it is the world's.
+    /// what is in reach again. The music is held too, when it is the world's — **held in place**, so it carries on where
+    /// it was rather than starting again from the top.
     public func pause() {
         guard !isPaused else { return }
         isPaused = true
         stopLoops()
-        if sounds.music != nil { music?.stop(fade: 0.3) }
+        if sounds.music != nil { music?.hold() }
     }
 
     public func resume() {
         guard isPaused else { return }
         isPaused = false
+        if sounds.music != nil { music?.release() }
         set(sounds)
     }
 
@@ -338,7 +343,11 @@ public final class Soundscape {
     public func stop() {
         stopLoops()
         waits = [:]
-        if sounds.music != nil { music?.stop() }
+        if sounds.music != nil {
+            music?.stop()
+            music?.release()
+            music?.mix = 1
+        }
         sounds = WorldFile.Sounds()
     }
 

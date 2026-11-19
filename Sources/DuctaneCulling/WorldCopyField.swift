@@ -34,6 +34,9 @@ public nonisolated struct WorldCopyField: Sendable {
         public var scale: Float
         /// Which prop it is a copy of: an index the caller keeps.
         public var prop: Int
+        /// **Which copies stay when ground cover is thinned** (``Settings/density``): a number from where it stands, so
+        /// the same copies stay every frame and every run, whatever order the copies are in.
+        public var seed: Int
 
         public init(transform: simd_float4x4, minimum: SIMD3<Float>, maximum: SIMD3<Float>, scale: Float, prop: Int) {
             self.transform = transform
@@ -43,6 +46,8 @@ public nonisolated struct WorldCopyField: Sendable {
             self.radius = simd_length(maximum - minimum) / 2
             self.scale = scale
             self.prop = prop
+            let x = Int((transform.columns.3.x * 16).rounded()), z = Int((transform.columns.3.z * 16).rounded())
+            self.seed = (x &* 73_856_093) ^ (z &* 19_349_663)
         }
     }
 
@@ -125,9 +130,16 @@ public nonisolated struct WorldCopyField: Sendable {
         public var farPictures: Bool
         /// The sun's cascades, nearest first; empty when the sun casts nothing.
         public var cascades: [Cascade]
+        /// **Per prop, whether it is ground cover a player can thin** — grass, flowers, crops — and the share of its
+        /// copies drawn (Ductane's `GraphicsSettings.plantDensity`). A thinned copy is neither drawn nor cast.
+        public var thinned: [Bool]
+        public var density: Float
 
         public init(eye: SIMD3<Float>, pixelsPerRadian: Float, view: [SIMD4<Float>], smallestDrawn: Float,
-                    smallestCaster: Float, forcedLevel: Int? = nil, farPictures: Bool = true, cascades: [Cascade] = []) {
+                    smallestCaster: Float, forcedLevel: Int? = nil, farPictures: Bool = true, cascades: [Cascade] = [],
+                    thinned: [Bool] = [], density: Float = 1) {
+            self.thinned = thinned
+            self.density = density
             self.eye = eye
             self.pixelsPerRadian = pixelsPerRadian
             self.view = view
@@ -183,6 +195,16 @@ public nonisolated struct WorldCopyField: Sendable {
         public init() {}
     }
 
+    /// **Whether a copy numbered `index` stays at `density`.** The same copies at the same density every frame and every
+    /// run — a hash, not a random draw — so a meadow thins evenly and nothing flickers; and lowering the density only
+    /// takes copies away, never swaps one for another. Fibonacci hashing: the index's fraction of the golden ratio, spread
+    /// evenly over 0..<1.
+    public static func keeps(_ index: Int, atDensity density: Float) -> Bool {
+        guard density < 1 else { return true }
+        let f = Double(index) * 0.618_033_988_749_894_9
+        return Float(f - f.rounded(.down)) < density
+    }
+
     /// **The copies this frame draws and casts**, grouped by prop and level.
     public func select(_ settings: Settings) -> Selection {
         // One slot more than any prop's levels: the far pictures' (``impostorLevel``).
@@ -207,8 +229,11 @@ public nonisolated struct WorldCopyField: Sendable {
             guard cellInView || cellCasts else { continue }
             opened += 1
 
+            let thins = settings.density < 1 && settings.forcedLevel == nil
             for index in cell.range {
                 let copy = copies[index]
+                if thins, copy.prop < settings.thinned.count, settings.thinned[copy.prop],
+                   !Self.keeps(copy.seed, atDensity: settings.density) { continue }
                 let centre = simd_distance(settings.eye, copy.centre)
                 let pixels = 2 * copy.radius * settings.pixelsPerRadian / max(centre - copy.radius, 0.5)
                 guard pixels >= settings.smallestDrawn || settings.forcedLevel != nil else { continue }

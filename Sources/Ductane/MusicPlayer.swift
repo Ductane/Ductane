@@ -41,6 +41,24 @@ public final class MusicPlayer {
     }
     private var level: Float
 
+    /// **The level the score is mixed at by what plays it**, 0…1, under the player's ``volume``: a world's own music
+    /// level (``WorldFile/Sounds/Music/volume``), which ``Soundscape`` sets. What is heard is the two multiplied, so a
+    /// world mixed quiet stays quiet and the player's music slider still rules it. 1, none, by default.
+    public var mix: Float {
+        get { mixLevel }
+        set {
+            mixLevel = min(max(newValue.isFinite ? newValue : 0, 0), 1)
+            volumeChanged()
+        }
+    }
+    private var mixLevel: Float = 1
+
+    /// What is heard: the player's ``volume`` under the ``mix``.
+    public var heard: Float { level * mixLevel }
+
+    /// **Held** by ``hold()``: hushed in place, the track and the list kept, until ``release()`` carries on from there.
+    public private(set) var isHeld = false
+
     /// Whether the score keeps playing while the game is not the front app.
     public var playsInBackground = false {
         didSet { applyFocus() }
@@ -92,13 +110,28 @@ public final class MusicPlayer {
     public func play(playlist tracks: [URL]) {
         guard !tracks.isEmpty else { return stop() }
         playlist = tracks
-        guard volume > 0, playingList != tracks else { return }
+        guard heard > 0, playingList != tracks else { return }
         if !playingList.isEmpty { send { await $0.stop(fade: 0.6) } }
         playingList = tracks
-        let (level, fade) = (volume, fadeIn)
+        let (level, fade) = (heard, fadeIn)
         send { await $0.start(tracks, volume: level, fadeIn: fade) }
         // A track asked for while the game is in the background starts quiet, not at full volume.
         if isQuiet { applyFocus() }
+    }
+
+    /// **Holds the score where it is** — under a menu, a paused game — fading it out and pausing the track, keeping the
+    /// list. ``release()`` carries on from the same place; a ``play(playlist:)`` meanwhile is kept for then.
+    public func hold() {
+        guard !isHeld else { return }
+        isHeld = true
+        applyFocus()
+    }
+
+    /// Carries the score on from where ``hold()`` left it, fading back up.
+    public func release() {
+        guard isHeld else { return }
+        isHeld = false
+        applyFocus()
     }
 
     /// Stops the score, faded. The next ``play(_:)`` starts the track from the beginning.
@@ -109,23 +142,23 @@ public final class MusicPlayer {
     }
 
     private func volumeChanged() {
-        if volume == 0 {
+        if heard == 0 {
             playingList = []
             send { await $0.stop(fade: 0) }
         } else if playingList.isEmpty, !playlist.isEmpty {
             play(playlist: playlist)
         } else if !isQuiet {
-            let level = volume
+            let level = heard
             send { await $0.setVolume(level) }
         }
         // While hushed there is nothing to set: the new level is what `resume` fades up to.
     }
 
-    private var isQuiet: Bool { isBackground && !playsInBackground }
+    private var isQuiet: Bool { (isBackground && !playsInBackground) || isHeld }
 
     private func applyFocus() {
         let quiet = isQuiet
-        let (level, fade) = (volume, focusFade)
+        let (level, fade) = (heard, focusFade)
         send { quiet ? await $0.hush(fade: fade) : await $0.resume(volume: level, fade: fade) }
     }
 

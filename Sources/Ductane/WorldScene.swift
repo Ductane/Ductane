@@ -116,6 +116,9 @@ public nonisolated struct WorldScene: Equatable, Sendable {
     public var foliage: [URL: Foliage]
     /// **How each prop moves in the wind**, by file.
     public var sway: [URL: Sway]
+    /// **Ground cover a person decided**, by file: true or false whatever the prop's shape. The rest are judged by shape
+    /// (``isGroundCover(_:size:cutOut:)``).
+    public var groundCover: [URL: Bool]
     /// **Whether a prop missing from ``foliage`` and ``sway`` is guessed from its file's name** (``Foliage/guess(name:)``,
     /// ``Sway/guess(name:)``) — an editor's way, where only what someone changed is set — or left as drawn, a world file's,
     /// which lists every prop the season or the wind moves.
@@ -135,7 +138,7 @@ public nonisolated struct WorldScene: Equatable, Sendable {
                 groundGrain: Float = 0, weather: Weather = .clear, waters: [WorldFile.Water] = [],
                 streams: [WorldFile.Stream] = [], effects: [Effect] = [], lights: [Light] = [],
                 boundary: WorldBoundary? = nil, foliage: [URL: Foliage] = [:], sway: [URL: Sway] = [:],
-                guessesByName: Bool = false, effectMeshes: [String: URL] = [:], found: [URL: String] = [:],
+                groundCover: [URL: Bool] = [:], guessesByName: Bool = false, effectMeshes: [String: URL] = [:], found: [URL: String] = [:],
                 markers: [WorldFile.Marker] = []) {
         self.placements = placements
         self.scatters = scatters
@@ -149,6 +152,7 @@ public nonisolated struct WorldScene: Equatable, Sendable {
         self.boundary = boundary
         self.foliage = foliage
         self.sway = sway
+        self.groundCover = groundCover
         self.guessesByName = guessesByName
         self.effectMeshes = effectMeshes
         self.found = found
@@ -168,6 +172,13 @@ public nonisolated struct WorldScene: Equatable, Sendable {
     /// **How a prop moves in the wind**: as set, else guessed from its name (``guessesByName``), else still.
     public func sway(of prop: URL) -> Sway {
         sway[prop] ?? (guessesByName ? Sway.guess(name: prop.deletingPathExtension().lastPathComponent) : .still)
+    }
+
+    /// **Whether a prop is ground cover**, which a player's ``GraphicsSettings/plantDensity`` thins: as a person set it
+    /// (``groundCover``), else by its shape (``GroundCover/byShape(size:cutOut:)``) — `size` its own, `cutOut` whether it
+    /// is drawn all in cut-out cards.
+    public func isGroundCover(_ prop: URL, size: SIMD3<Float>, cutOut: Bool) -> Bool {
+        groundCover[prop] ?? GroundCover.byShape(size: size, cutOut: cutOut)
     }
 
     /// The largest of a transform's three axes' lengths: how many times its own size a prop is drawn at, at most.
@@ -326,6 +337,8 @@ public nonisolated extension WorldScene {
         var foliage: [URL: Foliage] = [:], sway: [URL: Sway] = [:]
         for (prop, kind) in world.foliage where urls.indices.contains(prop) { foliage[urls[prop]] = kind }
         for (prop, kind) in world.sway where urls.indices.contains(prop) { sway[urls[prop]] = kind }
+        var groundCover: [URL: Bool] = [:]
+        for (prop, set) in world.groundCover where urls.indices.contains(prop) { groundCover[urls[prop]] = set }
         var found: [URL: String] = [:]
         for (prop, kind) in world.found where urls.indices.contains(prop) { found[urls[prop]] = kind }
         self.init(placements: placements, scatters: scatters, sky: world.sky, weather: world.weather ?? .clear,
@@ -334,7 +347,7 @@ public nonisolated extension WorldScene {
                       Light(position: WorldScene.vector($0.position), colour: WorldScene.vector($0.colour),
                             intensity: $0.intensity, reach: $0.reach)
                   },
-                  boundary: world.boundary, foliage: foliage, sway: sway, guessesByName: false, effectMeshes: meshes,
+                  boundary: world.boundary, foliage: foliage, sway: sway, groundCover: groundCover, guessesByName: false, effectMeshes: meshes,
                   found: found, markers: world.markers)
     }
 

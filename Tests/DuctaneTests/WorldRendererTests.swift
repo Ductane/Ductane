@@ -6,6 +6,8 @@
 import Foundation
 import Metal
 import Testing
+import ImageIO
+import CoreGraphics
 import simd
 @testable import Ductane
 
@@ -17,7 +19,7 @@ struct WorldRendererTests {
 
     /// A package as a world editor writes one, as a folder: a textured prop placed once and scattered twice, a 2 × 2 ground,
     /// an effect of falling leaves, a light, a stream.
-    private static func package() throws -> (WorldPackage, URL) {
+    private static func package(waters: [WorldFile.Water] = [], leaves falling: Bool = true) throws -> (WorldPackage, URL) {
         let folder = FileManager.default.temporaryDirectory.appending(path: "WorldRendererTests-\(UUID().uuidString)")
         let props = folder.appending(path: "props/1_textured-quad")
         try FileManager.default.createDirectory(at: props, withIntermediateDirectories: true)
@@ -33,12 +35,14 @@ struct WorldRendererTests {
         let leaves = WorldRendererTests.recipe
         let world = WorldFile(
             name: "Clearing", props: ["props/1_textured-quad/textured-quad.usda"], foliage: [0: .turns], sway: [0: .plant],
+            groundCover: [0: false],
             placements: [WorldFile.Placement(prop: 0, transform: placed),
                          WorldFile.Placement(prop: 0, transform: scattered, scattered: true),
                          WorldFile.Placement(prop: 0, transform: placed, scattered: true)],
             ground: WorldFile.Ground(size: 4, resolution: 2), sky: WorldFile.Sky(timeOfDay: 12),
             lights: [WorldFile.Light(position: [0, 2, 0], colour: [1, 0.5, 0.2], intensity: 3, reach: 6)],
-            effects: [WorldFile.Effect(kind: "leaves", variety: 0, position: SIMD3(0, 3, 0), rate: 2, radius: 1,
+            waters: waters,
+            effects: !falling ? [] : [WorldFile.Effect(kind: "leaves", variety: 0, position: SIMD3(0, 3, 0), rate: 2, radius: 1,
                                        direction: SIMD3(0, 1, 0), prewarm: 1, followsSun: false, recipe: leaves)])
         try world.data().write(to: folder.appending(path: WorldPackage.descriptionPath))
         try WorldFile.Ground.heightsData((0..<9).map { Float($0 % 3) * 0.25 }).write(to: folder.appending(path: "game/ground.f32"))
@@ -61,6 +65,7 @@ struct WorldRendererTests {
         #expect(scene.scatters[0].copies.map(\.transform.columns.3) == [SIMD4(1, 0, 1, 1), SIMD4(0, 0, -1, 1)])
         #expect(scene.foliage(of: prop) == .turns)
         #expect(scene.sway(of: prop) == .plant)
+        #expect(scene.groundCover[prop] == false, "what a person decided about ground cover comes through by file")
         #expect(scene.foliage(of: URL(filePath: "/elsewhere/Pine.usda")) == .unchanged, "a world file lists every prop that changes")
         #expect(scene.effects.count == 1)
         #expect(scene.effects[0].turnedVariety == 1, "falling leaves take their turned look")
@@ -154,6 +159,61 @@ struct WorldRendererTests {
         let png = try #require(world.pngFrame(width: 64, height: 40))
         #expect(png.count > 100)
         #expect(world.drawn.view > 0, "the ground and the prop were drawn")
+    }
+
+    /// With reflections on, the water mirrors the scene drawn behind it — the solid pass's colour is kept for it — and with
+    /// them off it reflects the sky alone, as before, in one pass.
+    @Test("Water reflects the scene with reflections on, and only the sky with them off")
+    func waterReflects() async throws {
+        guard let device = MTLCreateSystemDefaultDevice(), device.supportsFamily(.metal4) else { return }
+        let pond = WorldFile.Water(level: 0.6, colour: SIMD3(0.05, 0.1, 0.12), opacity: 0.9, rectangles: [SIMD4(-2, 0, 2, 2)])
+        let (package, folder) = try Self.package(waters: [pond], leaves: false)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let engine = try FrameRenderer(device: device)
+        let world = try WorldRenderer(engine: engine, textureCache: nil)
+        engine.game = world
+        world.scheduleTime = 1_794_000_000
+        var failures: [(URL, Error)]?
+        try world.show(package) { failures = $0 }
+        for _ in 0..<500 where failures == nil { try await Task.sleep(for: .milliseconds(20)) }
+        // Low over the pond, looking across it at the quad standing behind.
+        world.camera = WorldRenderer.View(eye: SIMD3(0, 0.9, 3.5), target: SIMD3(0, 0.4, -1))
+
+        // Off first, on a renderer that has never reflected: the water's textures must be bound all the same, or Metal's
+        // validation refuses the draw (it did, in an editor, before the stand-ins).
+        world.graphicsSettings.reflections = false
+        #expect(!world.waterReflects && !world.wantsOpaqueColour)
+        let skyOnly = try #require(world.pngFrame(width: 160, height: 100))
+        let skyOnlyAgain = try #require(world.pngFrame(width: 160, height: 100))
+        world.graphicsSettings.reflections = true
+        #expect(world.waterReflects && world.wantsOpaqueTextures && world.wantsOpaqueColour)
+        let mirrored = try #require(world.pngFrame(width: 160, height: 100))
+        // Frames drift a little on their own (the sky's adaptation, the weather's clock): the reflection's change must
+        // stand well above that drift.
+        let drift = try Self.difference(skyOnly, skyOnlyAgain), change = try Self.difference(mirrored, skyOnly)
+        #expect(change > drift * 4 + 0.2, "turning reflections on changed the water by \(change), against \(drift) drift")
+        // A scene without water never pays for the colour.
+        let (dry, dryFolder) = try Self.package()
+        defer { try? FileManager.default.removeItem(at: dryFolder) }
+        world.graphicsSettings.reflections = true
+        try world.show(dry) { _ in }
+        #expect(!world.waterReflects && !world.wantsOpaqueColour)
+    }
+
+    /// The mean difference between two frames' pixels, 0–255 a channel.
+    private static func difference(_ a: Data, _ b: Data) throws -> Double {
+        func rgba(_ png: Data) throws -> [UInt8] {
+            let source = try #require(CGImageSourceCreateWithData(png as CFData, nil))
+            let image = try #require(CGImageSourceCreateImageAtIndex(source, 0, nil))
+            var bytes = [UInt8](repeating: 0, count: image.width * image.height * 4)
+            let context = try #require(CGContext(data: &bytes, width: image.width, height: image.height, bitsPerComponent: 8,
+                                                 bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+            return bytes
+        }
+        let x = try rgba(a), y = try rgba(b)
+        return zip(x, y).reduce(0.0) { $0 + abs(Double($1.0) - Double($1.1)) } / Double(max(x.count, 1))
     }
 
     @Test("A walker meets the props near it, placed and scattered, and none it passes through")

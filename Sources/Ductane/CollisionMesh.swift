@@ -331,6 +331,24 @@ public nonisolated struct CollisionMesh: Sendable {
     /// **Stopping at the first cell past the nearest hit is exact**: a hit lies in the cell the ray is in at that
     /// distance, and a triangle is filed in every cell its plan touches, so no nearer hit is in a cell not yet asked.
     public func firstHit(from origin: SIMD3<Float>, direction: SIMD3<Float>, limit: Float) -> Float? {
+        nearest(from: origin, direction: direction, limit: limit)?.distance
+    }
+
+    /// ``firstHit(from:direction:limit:)`` with **where it landed and which way the struck triangle faces** — for a
+    /// mark left on a cave wall or a bridge's deck. The normal faces the side the ray came from, whichever way the
+    /// triangle was wound, and ``SurfaceHit/index`` is the triangle's.
+    public func firstSurfaceHit(from origin: SIMD3<Float>, direction: SIMD3<Float>, limit: Float) -> SurfaceHit? {
+        guard let hit = nearest(from: origin, direction: direction, limit: limit) else { return nil }
+        let a = corner(hit.triangle, 0), b = corner(hit.triangle, 1), c = corner(hit.triangle, 2)
+        var normal = simd_normalize(simd_cross(b - a, c - a))
+        if simd_dot(normal, direction) > 0 { normal = -normal }
+        return SurfaceHit(index: Int(hit.triangle), distance: hit.distance, point: origin + direction * hit.distance,
+                          normal: normal)
+    }
+
+    /// The nearest triangle along a ray and how far — the walk both hit tests share.
+    private func nearest(from origin: SIMD3<Float>, direction: SIMD3<Float>,
+                         limit: Float) -> (distance: Float, triangle: Int32)? {
         guard limit > 0, !cellTriangles.isEmpty else { return nil }
         let cell = Self.cellSize
         // Where the ray starts, in cells, and which way it steps through them.
@@ -347,6 +365,7 @@ public nonisolated struct CollisionMesh: Sendable {
         let slack: Float = 1e-3
 
         var best: Float?
+        var struck: Int32 = 0
         var enter: Float = 0
         while enter <= limit, enter < (best ?? .infinity) {
             let exit = Swift.min(edgeX, edgeZ, limit)
@@ -373,7 +392,7 @@ public nonisolated struct CollisionMesh: Sendable {
                     let v = simd_dot(direction, q) / det
                     guard v >= 0, u + v <= 1 else { continue }
                     let distance = simd_dot(e2, q) / det
-                    if distance > 0, distance < (best ?? limit) { best = distance }
+                    if distance > 0, distance < (best ?? limit) { best = distance; struck = t }
                 }
             }
             if edgeX < edgeZ {
@@ -386,7 +405,7 @@ public nonisolated struct CollisionMesh: Sendable {
                 edgeZ += acrossZ
             }
         }
-        return best
+        return best.map { ($0, struck) }
     }
 
     private static func contains(_ p: SIMD2<Float>, _ a: SIMD2<Float>, _ b: SIMD2<Float>, _ c: SIMD2<Float>) -> Bool {

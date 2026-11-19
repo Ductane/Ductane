@@ -77,6 +77,25 @@ public nonisolated struct StaticVolumes: Sendable {
         }
     }
 
+    /// ``firstHit(segmentFrom:to:)`` with where it landed and which way that surface faces — the same answer as
+    /// ``Volume/firstSurfaceHit(segmentFrom:to:against:)``. A segment of no length enters nothing.
+    public func firstSurfaceHit(segmentFrom start: SIMD3<Float>, to end: SIMD3<Float>) -> SurfaceHit? {
+        let length = simd_distance(start, end)
+        guard length > 0 else { return nil }
+        return firstSurfaceHit(origin: start, direction: (end - start) / length, maxDistance: length)
+    }
+
+    /// ``firstHit(origin:direction:maxDistance:)`` with where it landed and which way that surface faces — the same
+    /// answer as ``Volume/firstSurfaceHit(origin:direction:against:maxDistance:)``.
+    public func firstSurfaceHit(origin: SIMD3<Float>, direction: SIMD3<Float>,
+                                maxDistance: Float = .greatestFiniteMagnitude) -> SurfaceHit? {
+        guard let found = firstHit(origin: origin, direction: direction, maxDistance: maxDistance),
+              let hit = bounds[found.index].hit(ofRayFrom: origin, direction: direction, maxDistance: maxDistance)
+        else { return nil }
+        return SurfaceHit(index: found.index, distance: hit.distance, point: origin + direction * hit.distance,
+                          normal: hit.normal)
+    }
+
     /// **The cells under the path, in order, nearest first** — a grid walk over the ground plane, by distance along
     /// the 3D direction, which is the same parameter as along its shadow on the ground. Stops at the first cell whose
     /// far edge is past the nearest hit found so far: nothing further on can be nearer.

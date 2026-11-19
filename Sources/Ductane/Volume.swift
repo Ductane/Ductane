@@ -84,4 +84,53 @@ public nonisolated struct Volume: Equatable, Sendable {
         }
         return best
     }
+
+    /// ``firstHit(segmentFrom:to:against:)`` with **where it landed and which way that surface faces** — for a
+    /// mark left on what the shot struck (``DecalSet/mark(at:normal:size:uvRect:tint:)``), a ricochet, or sparks
+    /// thrown off the face rather than back along the shot.
+    ///
+    /// The face is one of the volume's world bounds, the same box the distance comes from: a volume turned on
+    /// a deck is hit, and faced, as the axis-aligned box round it. A segment of no length enters nothing.
+    public static func firstSurfaceHit(segmentFrom start: SIMD3<Float>, to end: SIMD3<Float>,
+                                       against volumes: [Volume]) -> SurfaceHit? {
+        let length = simd_distance(start, end)
+        guard length > 0 else { return nil }
+        return firstSurfaceHit(origin: start, direction: (end - start) / length, against: volumes, maxDistance: length)
+    }
+
+    /// ``firstHit(origin:direction:against:maxDistance:)`` with where it landed and which way that surface faces.
+    /// Distances are in multiples of `direction`'s length, as there.
+    public static func firstSurfaceHit(origin: SIMD3<Float>, direction: SIMD3<Float>, against volumes: [Volume],
+                                       maxDistance: Float = .greatestFiniteMagnitude) -> SurfaceHit? {
+        var best: SurfaceHit?
+        for (index, volume) in volumes.enumerated() {
+            if let hit = volume.worldBounds.hit(ofRayFrom: origin, direction: direction, maxDistance: maxDistance),
+               best == nil || hit.distance < best!.distance {
+                best = SurfaceHit(index: index, distance: hit.distance, point: origin + direction * hit.distance,
+                                  normal: hit.normal)
+            }
+        }
+        return best
+    }
+}
+
+/// **What a shot struck, where, and which way that surface faces** — the answer a hit test gives when a game
+/// needs more than how far: a mark laid flat on the face (``DecalSet``), dust thrown off it, a round glancing away.
+public nonisolated struct SurfaceHit: Equatable, Sendable {
+    /// Which of the things asked was struck: the volume's index in the list given, or the triangle's in a
+    /// ``CollisionMesh``.
+    public var index: Int
+    /// How far along the shot, in multiples of the direction's length — metres for a unit direction or a segment.
+    public var distance: Float
+    /// Where it landed.
+    public var point: SIMD3<Float>
+    /// The struck surface's unit normal, facing the side the shot came from.
+    public var normal: SIMD3<Float>
+
+    public init(index: Int, distance: Float, point: SIMD3<Float>, normal: SIMD3<Float>) {
+        self.index = index
+        self.distance = distance
+        self.point = point
+        self.normal = normal
+    }
 }

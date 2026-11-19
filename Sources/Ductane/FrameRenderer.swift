@@ -173,6 +173,11 @@ public final class FrameRenderer {
     /// after the scene pass changes. **Every pipeline a game draws into the scene pass must be built with this
     /// `rasterSampleCount`**, and rebuilt when it changes (``SkyPass`` takes it too). 1, the default, is no multisampling;
     /// a count the device cannot do is treated as 1 (``supportsSampleCount(_:)``).
+    ///
+    /// **1 here and 4 in ``GraphicsSettings/antiAliasing``, on purpose.** This is the renderer before a game has said
+    /// anything: every scene pipeline must match it, so it starts at the count every pipeline is built for unless told
+    /// otherwise. The settings' 4 is where a graphics menu starts; ``apply(_:automaticScaling:)`` is what joins them, and
+    /// a game that applies its settings draws at theirs.
     public var sampleCount = 1
     /// Whether the scene can be drawn at this many samples per pixel on this device.
     public func supportsSampleCount(_ count: Int) -> Bool {
@@ -439,6 +444,12 @@ public final class FrameRenderer {
         layer.framebufferOnly = false
     }
 
+    /// A display link driving this renderer's frames, asking the display for `frameRateRange`.
+    ///
+    /// **The default asks for the best the display can do — up to 120, at least 30 — where ``GraphicsSettings/frameRate``
+    /// starts at 60, on purpose.** This is a game that has not said what it wants; the settings' 60 is where a graphics
+    /// menu starts, so a world dressed for 60 is not pushed to 120 unasked. A game with settings passes theirs
+    /// (``GraphicsSettings/frameRateRange``) — ``WorldRenderer`` does, through its `onFrameRateChange`.
     public func makeDisplayLink(
         for layer: CAMetalLayer,
         frameRateRange: CAFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)

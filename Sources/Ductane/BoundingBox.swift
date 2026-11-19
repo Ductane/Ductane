@@ -83,6 +83,39 @@ public nonisolated struct BoundingBox: Sendable, Equatable {
         return max(entry, 0)
     }
 
+    /// Where a ray first enters the box and **which face it enters through**: the distance, as
+    /// ``hitDistance(ofRayFrom:direction:maxDistance:)`` gives it, and that face's outward normal — what a
+    /// mark left where the ray landed lies flat against.
+    ///
+    /// The face is the slab whose near plane the ray crosses last, which is the one it is entering when it
+    /// reaches the box. A ray starting inside enters through no face; its normal faces back along the ray.
+    public func hit(ofRayFrom origin: SIMD3<Float>, direction: SIMD3<Float>,
+                    maxDistance: Float = .greatestFiniteMagnitude) -> (distance: Float, normal: SIMD3<Float>)? {
+        let inverse = 1 / direction
+        let t0 = (minimum - origin) * inverse
+        let t1 = (maximum - origin) * inverse
+        let near = simd_min(t0, t1)
+        let far = simd_max(t0, t1)
+        let entry = max(max(near.x, near.y), near.z)
+        let exit = min(min(far.x, far.y), far.z)
+        guard exit >= max(entry, 0), entry <= maxDistance else { return nil }
+        guard entry >= 0 else { return (0, -simd_normalize(direction)) }
+        // The axis whose near plane is the entry; the face on it faces against the ray.
+        let axis = near.x >= near.y && near.x >= near.z ? 0 : (near.y >= near.z ? 1 : 2)
+        var normal = SIMD3<Float>.zero
+        normal[axis] = direction[axis] > 0 ? -1 : 1
+        return (entry, normal)
+    }
+
+    /// The segment form of ``hit(ofRayFrom:direction:maxDistance:)``: distance from `start` in the box's
+    /// units, and the face the segment enters through.
+    public func hit(ofSegmentFrom start: SIMD3<Float>, to end: SIMD3<Float>) -> (distance: Float, normal: SIMD3<Float>)? {
+        let delta = end - start
+        let length = simd_length(delta)
+        guard length > 0 else { return nil }
+        return hit(ofRayFrom: start, direction: delta / length, maxDistance: length)
+    }
+
     /// Distance from `start` to where a segment running to `end` first touches the box, or nil if it
     /// does not — 0 when `start` is inside.
     public func hitDistance(ofSegmentFrom start: SIMD3<Float>, to end: SIMD3<Float>) -> Float? {

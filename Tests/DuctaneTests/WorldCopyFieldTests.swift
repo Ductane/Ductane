@@ -133,6 +133,63 @@ struct WorldCopyFieldTests {
             return l > 1e-6 ? p / l : nil
         }
     }
+
+    /// A player turning grass down thins only the ground cover, takes the same copies every frame, and only takes more
+    /// away as it falls — never swaps one for another, which would read as grass flickering.
+    @Test("Ground cover thins to the density: the same copies each time, fewer as it falls, nothing else touched")
+    func groundCoverThins() {
+        let copies = field()
+        func chosen(_ density: Float) -> (cover: Set<SIMD3<Float>>, others: Int) {
+            let settings = WorldCopyField.Settings(eye: SIMD3(0, 400, 0), pixelsPerRadian: 1000, view: [], smallestDrawn: 0,
+                                                   smallestCaster: 80, thinned: [true, false], density: density)
+            let selection = copies.select(settings)
+            var cover = Set<SIMD3<Float>>(), others = 0
+            for run in selection.visible.runs {
+                let positions = selection.visible.transforms[run.start..<run.start + run.count]
+                    .map { SIMD3($0.columns.3.x, $0.columns.3.y, $0.columns.3.z) }
+                if run.prop == 0 { cover.formUnion(positions) } else { others += positions.count }
+            }
+            return (cover, others)
+        }
+        let all = chosen(1), half = chosen(0.5), quarter = chosen(0.25)
+        #expect(all.cover.count > 3000)
+        let share = Float(half.cover.count) / Float(all.cover.count)
+        #expect(abs(share - 0.5) < 0.05, "half the density drew \(share) of the grass")
+        #expect(abs(Float(quarter.cover.count) / Float(all.cover.count) - 0.25) < 0.05)
+        #expect(quarter.cover.isSubset(of: half.cover), "lowering the density swapped copies instead of taking them away")
+        #expect(chosen(0.5).cover == half.cover, "a second frame chose different copies")
+        #expect(half.others == all.others && quarter.others == all.others, "what is not ground cover was thinned")
+    }
+
+    /// The draw distance divides the smallest size drawn, so every kind comes in by the same share of its own distance.
+    @Test("A shorter draw distance brings every kind in by the same share of its own distance")
+    func drawDistanceIsAShareOfEachKindsOwn() {
+        let small = WorldCopyField.Copy(transform: simd_float4x4(translation: .zero), minimum: SIMD3(repeating: -0.2),
+                                        maximum: SIMD3(repeating: 0.2), scale: 1, prop: 0)
+        let big = WorldCopyField.Copy(transform: simd_float4x4(translation: .zero), minimum: SIMD3(repeating: -4),
+                                      maximum: SIMD3(repeating: 4), scale: 1, prop: 1)
+        // Each kind's own distance: where it is `smallest` pixels across.
+        func farthest(_ copy: WorldCopyField.Copy, smallest: Float) -> Float {
+            var low: Float = 0, high: Float = 100_000
+            for _ in 0..<60 {
+                let mid = (low + high) / 2
+                var moved = copy
+                moved.centre = SIMD3(0, 0, mid)
+                moved.minimum = moved.centre - SIMD3(repeating: copy.radius)
+                moved.maximum = moved.centre + SIMD3(repeating: copy.radius)
+                let field = WorldCopyField(copies: [moved], errors: [[], []])
+                let drawn = !field.select(WorldCopyField.Settings(eye: .zero, pixelsPerRadian: 1000, view: [],
+                                                                  smallestDrawn: smallest, smallestCaster: 1e9))
+                    .visible.isEmpty
+                if drawn { low = mid } else { high = mid }
+            }
+            return low
+        }
+        for copy in [small, big] {
+            let full = farthest(copy, smallest: 3), short = farthest(copy, smallest: 3 / 0.6)
+            #expect(abs(short / full - 0.6) < 0.02, "a 60% draw distance drew it to \(short / full) of its own")
+        }
+    }
 }
 
 private extension simd_float4x4 {

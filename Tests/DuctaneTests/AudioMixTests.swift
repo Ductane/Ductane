@@ -342,6 +342,53 @@ struct MusicPlayerTests {
         #expect(await music.isAudible() == false)
     }
 
+    /// A world mixes its score at its own level, but the player's music slider must still rule it.
+    @Test("A score's mix sits under the player's volume, and zero of either silences it")
+    func mixUnderVolume() async {
+        let music = MusicPlayer(volume: 0.5)
+        music.mix = 0.4
+        #expect(abs(music.heard - 0.2) < 1e-6)
+        music.volume = 0.25
+        #expect(abs(music.mix - 0.4) < 1e-6 && abs(music.heard - 0.1) < 1e-6, "the player's volume moved the mix")
+        music.play(track)
+        music.mix = 0
+        #expect(music.playing == nil && music.track == track, "a silent mix forgot the track")
+        music.mix = 1.7
+        #expect(music.mix == 1 && music.playing == track)
+        music.stop(fade: 0)
+        await music.settle()
+    }
+
+    /// Held under a menu, the score keeps its place; released, it carries on without starting a track again.
+    @Test("A held score pauses in place and carries on when released")
+    func holdKeepsPlace() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("du-hold-\(UUID()).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 96_000))
+        buffer.frameLength = 96_000
+        do { try AVAudioFile(forWriting: url, settings: format.settings).write(from: buffer) }
+
+        let music = MusicPlayer(volume: 0.01)
+        music.fadeIn = 0
+        music.focusFade = 0.05
+        music.playsInBackground = true
+        music.play(url)
+        await music.settle()
+        #expect(await music.isAudible())
+        music.hold()
+        await music.settle()
+        #expect(await music.isAudible() == false, "a held score kept playing")
+        #expect(music.isHeld && music.playlist == [url] && music.playing == url, "holding forgot the track")
+        music.play(url)   // asked again while held: kept for later, not started over it
+        music.release()
+        await music.settle()
+        #expect(await music.isAudible(), "the score did not carry on")
+        #expect(await music.startedTracks() == [url], "released, the track started again from the top")
+        music.stop(fade: 0)
+        await music.settle()
+    }
+
     @Test("The player's music sits under their main volume")
     func appliesSettings() async {
         let music = MusicPlayer()
