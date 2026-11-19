@@ -4,6 +4,40 @@ Every release of Ductane, newest first. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **World rendering** — `WorldPackage(contentsOf:cache:)` opens a world exported as `.usdz`, with its props, ground, collision shapes, sky, water, effects, sounds and markers. `WorldRenderer` draws the whole world: ground, props, sky, weather, fog and seasons. Call `show(_:loaded:)` to display a package. `WorldFile` is the public, documented world description inside the export, so any tool can write one. `WorldFile.Marker` and `markers(_:)` give a game the points of interest it defines for itself.
+- **World building blocks** — `WorldScene`, `WorldGround`, `WorldGroundSource`, `WorldPackageGround`, `WorldGroundRegion` and `WorldWaterGrid`, for games and editors that build or edit a world in code. `WorldRenderer.showGround(_:changed:)` redraws only the part of the ground that changed. `loadPropsInBackground(_:)` and `reload(_:)` load props without blocking a frame.
+- **New game template** — `swift run ductane-new "My Game" --organization com.example` writes an Xcode project that opens an exported world, draws it with `WorldRenderer` and walks it in first person. The same files are available to apps through the new `DuctaneTemplate` library (`GameProject`).
+- **Weather** — `Weather` covers clear, rain, snow, storm, dust and fog (`Weather.Kind`), with presets by severity or settings by hand. It adjusts the lighting and fog density and includes lightning: `Weather.Strike` handles flash, thunder delay and thunder volume, and `LightningBolt` gives the bolt's shape. `WeatherRenderer` draws falling rain and snow, splashes and lightning. `WeatherSchedule` changes the weather over time from chances you set, which can vary by season, and builds up and melts snow. It runs on a shared clock, so every player sees the same weather.
+- **Weather on surfaces** — `WeatherSurface` and `WeatherCover` make ground and props wet, snow-covered or sheltered under cover. Game shaders get the same effects with `#include "DuctaneWeather.h"`. `ShaderLibrary.withEngineHeaders(_:)` makes that include work for libraries compiled from source at run time. `SnowCap` builds geometry for snow lying on props.
+- **World clock and calendar** — `WorldClock` drives the time of day, with a configurable day length and a faster night, plus seasons, moon phase, a night counter and the foliage phase. `WorldClock.sky(_:at:)` gives you the matching `DaySky`.
+- **A real sky** — Set `DaySky.latitude` and `yearPosition` and the sun follows the date: short, low winter days and long, high summer ones (`DaySky.sunDirection(at:latitude:yearPosition:)`, `DaySky.daylight(latitude:yearPosition:)`). `DaySky.moonAge` sets the moon's phase and position, and a new moon's night is darker. `DaySky.night` returns a `NightSky` with stars turning about the pole, the moon and an aurora (`DaySky.aurora`, `auroraStrength`). `SkyPass.encode` takes new `night:`, `clouds:`, `time:` and `rainbow:` parameters, all with defaults.
+- **Volumetric clouds** — `CloudPass` raymarches the cloud layer, blending each frame with the last so cloud edges don't shimmer. `CloudShape` sets a world's cloud height, thickness and speed. `CloudLayer` gives cloud coverage, how far the wind has carried the clouds, and cloud shadows on the ground (`shadow(at:light:)`, `coverageTexture(device:)`).
+- **Volumetric fog** — `VolumetricFog` adds sun shafts through the shadow map, ground fog that settles in hollows and over water (`GroundFog`, `FogFloor`), and lights glowing in the haze. Surfaces apply it with `duFogApply`, and `FogSkyPass` draws it over the sky.
+- **New graphics settings** — `GraphicsSettings.clouds` (`CloudQuality`: `.flat`, `.medium`, `.high`), `GraphicsSettings.fog` (`FogQuality`: `.low`, `.medium`, `.high`) and `GraphicsSettings.snowDepth`. The quality presets set all three: Low draws flat clouds, distance fog only and no snow depth. Settings saved by an earlier version decode with the new defaults.
+- **Seasonal foliage** — `FallColors` turns trees yellow, orange or red in autumn, each tree at its own pace (`Palette`: `.mixed`, `.golden`, `.fiery` or `.custom`). Leaves thin until broadleaf trees stand bare, fallen leaves gather beneath them, grass turns to straw, and everything greens again in spring. `Foliage.guess(name:)` and `Sway.guess(name:)` work out from a prop's name whether it changes with the seasons and how it moves in the wind.
+- **Footprints** — `FootprintTrail` records a boot or bare-foot print for each step a character takes, and the weather wipes them over time (`wipeRate(_:)`). `FootprintGrid` passes the prints near the eye to a shader, which draws them sharp at any distance.
+- **Waymarks** — `Waymark` draws a guiding path to a target, routed around obstacles with `Waymark.way(from:to:grid:…)`, in several patterns, with an optional beam and sound (`WaymarkRenderer`, `WaymarkSound`). `WaymarkScan` sends a ring out from the player that outlines things worth finding through walls (`Findable`, `Findables`, `WaymarkScanRenderer`).
+- **Soundscapes** — `Soundscape` plays a world's sounds from `WorldFile.Sounds`: loops at points, area ambiences that fade at their edges, randomly timed one-shots, music, and sounds that follow the weather, the time of day and the hours set for each sound.
+- **Per-sound reach** — `AudioEngine.startLoop(_:at:volume:reach:)` and `playAmbient(_:at:volume:reach:)` play a sound that carries exactly `reach` metres (`SoundReach`). New `setLoopVolume(_:to:)` and `setLoopReach(_:to:)` adjust a playing loop. You can now place stereo recordings, or ones at any sample rate; they are mixed to mono the first time they are placed.
+- **Music playlists** — `MusicPlayer.play(playlist:)` plays tracks one after another, skipping any that can't be opened. `MusicPlayer.playlist` and `current()` report what is queued and playing.
+- **Path costs** — `NavigationGrid.path(from:to:searchLimit:extraCost:)` takes an optional cost per place, so paths avoid ground you'd rather not cross, such as water or danger, without forbidding it.
+- **Loading screen** — `LoadingScreen` draws a title, a subtitle and a progress bar into the HUD (`report(_:)`, `finish()`).
+- **Frame rate readout** — `FrameRateReadout` shows the average frame time and the worst frame since the last reading, a few times a second.
+- **Loading skinned models off the main thread** — `SkinnedModel.read(url:vertexDescriptor:semantics:)` parses a file on any thread, and `SkinnedModel.init(_:device:vertexDescriptor:semantics:)` creates the GPU resources from the result.
+- **Prop levels of detail** — `PropLevels` finds a prop's pre-made `.LODn.usda` levels next to it.
+
+### Changed
+
+- **Performance and stability improvements** — A world's per-frame loops (copy culling, ground vertices, puddles) now live in their own target, built optimized in Debug too, so large maps no longer stutter when run from Xcode. Footprint grid updates only process the cells that prints touch.
+
+### Fixed
+
+- **Soft particles and liquids with multisampling** — The solid scene's depth is now resolved by a shader pass of the engine's own. The attachment's own resolve sometimes left the depth copy unwritten, about one frame in ten after a render target was recreated, so soft particles and liquids flickered as if nothing was behind them.
+
 ## [1.4.0] — 2026-11-09
 
 ### Added
