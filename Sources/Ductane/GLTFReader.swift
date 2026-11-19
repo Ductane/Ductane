@@ -259,6 +259,18 @@ private nonisolated struct Reader {
         for (index, node) in nodes.enumerated() {
             for child in node.children ?? [] where nodes.indices.contains(child) { parents[child] = index }
         }
+        // **A node that is its own ancestor is refused**: glTF's nodes are a strict tree, and every walk up from a node
+        // here — to its world transform, to the joint above it — would otherwise go round for ever.
+        var acyclic = Set<Int>()
+        for node in nodes.indices where !acyclic.contains(node) {
+            var chain: [Int] = [], at: Int? = node
+            while let current = at, !acyclic.contains(current) {
+                guard chain.count <= nodes.count else { throw GLTFError.unreadable(file: url.lastPathComponent) }
+                chain.append(current)
+                at = parents[current]
+            }
+            acyclic.formUnion(chain)
+        }
         self.parents = parents
         // The default scene's roots, or — for a file with no scenes, which glTF allows — every node
         // nothing else parents.
@@ -543,8 +555,11 @@ private nonisolated struct Reader {
     /// Index data, of any integer width.
     fileprivate func readIndices(_ index: Int) throws -> [UInt32] {
         guard let accessor = document.accessors?[safe: index] else { throw GLTFError.unreadable(file: file) }
-        return try readFloats(index, components: 1, rawIntegers: true).map { UInt32($0[0]) }
-            .prefix(accessor.count).map { $0 }
+        return try readFloats(index, components: 1, rawIntegers: true).prefix(accessor.count).map { value in
+            // A float accessor may say anything; an index that is not a whole number in range is a damaged file.
+            guard value[0].isFinite, value[0] >= 0, value[0] < 4_294_967_296 else { throw GLTFError.unreadable(file: file) }
+            return UInt32(value[0])
+        }
     }
 
     /// A sparse accessor's indices, which live in their own small block rather than an accessor.
@@ -685,7 +700,7 @@ private nonisolated extension Reader {
         var joints: Joints?
         var vertexTransforms: [Int: simd_float4x4] = [:]
         if let skinned = skinJoints(skins) {
-            let rig = makeJoints(skinned)
+            let rig = try makeJoints(skinned)
             let local = rig.restLocal
             var modelRest: [simd_float4x4] = []
             for (joint, node) in rig.nodeOfJoint.enumerated() {
@@ -718,7 +733,7 @@ private nonisolated extension Reader {
                                     inverseBindTransforms: inverseBinds.enumerated().map { $1 ?? modelRest[$0].inverse })
             joints = rig
         } else if let animated = animatedJoints() {
-            joints = makeJoints(animated)
+            joints = try makeJoints(animated)
         }
 
         var clips: [AnimationClip] = [], dropped: [(clip: String, reason: String)] = []
@@ -831,7 +846,9 @@ private nonisolated extension Reader {
         }
     }
 
-    func makeJoints(_ ordered: [Int]) -> Joints {
+    /// - Throws: ``GLTFError/unreadable(file:)`` when the joints cannot be put parent first — a joint whose parent joint
+    ///   comes after it, which only a file whose joints lie outside its scene can make.
+    func makeJoints(_ ordered: [Int]) throws -> Joints {
         var jointOfNode: [Int: Int] = [:]
         for (joint, node) in ordered.enumerated() { jointOfNode[node] = joint }
         let placement = parents[ordered[0]].map(worldTransform(of:)) ?? matrix_identity_float4x4
@@ -845,7 +862,9 @@ private nonisolated extension Reader {
                 prefix = TRS(nodes[above]).matrix * prefix
                 ancestor = parents[above]
             }
-            let parentPath = ancestor.flatMap { jointOfNode[$0] }.map { paths[$0] }
+            let parentJoint = ancestor.flatMap { jointOfNode[$0] }
+            if let parentJoint, parentJoint >= paths.count { throw GLTFError.unreadable(file: file) }
+            let parentPath = parentJoint.map { paths[$0] }
             if parentPath == nil { prefix = placement.inverse * prefix }
             var name = (nodes[node].name ?? "").replacingOccurrences(of: "/", with: "_")
             if name.isEmpty { name = "joint\(node)" }
@@ -883,8 +902,11 @@ private nonisolated extension Reader {
             var lanes: [(joint: UInt16, weight: Float)] = []
             for (joints, weights) in sets {
                 for lane in 0..<4 where weights[vertex][lane] > 0 {
-                    let index = Int(joints[vertex][lane])
-                    guard index >= 0, index < remap.count else { throw GLTFError.unreadable(file: file) }
+                    // A joint index must be a whole number naming one of the skin's joints; a float accessor or a
+                    // damaged one may hold anything, which converted unchecked would stop the program.
+                    let value = joints[vertex][lane]
+                    guard value.isFinite, value >= 0, value < Float(remap.count), let index = Int(exactly: value.rounded())
+                    else { throw GLTFError.unreadable(file: file) }
                     lanes.append((remap[index], weights[vertex][lane]))
                 }
             }
@@ -990,7 +1012,12 @@ private nonisolated extension Reader {
         var times = Set(all.flatMap(\.times))
         let start = times.min()!, end = times.max()!
         if all.contains(where: { $0.interpolation == "CUBICSPLINE" }), end > start {
-            let steps = Int(((end - start) * 30).rounded(.up))
+            // Thirty a second through a clip of a day would be millions of keys: a clip that long is a damaged one.
+            let samples = ((end - start) * 30).rounded(.up)
+            guard samples.isFinite, samples <= 30 * 3600 else {
+                throw ClipProblem(reason: "its cubic keys run \(end - start) seconds, longer than the hour a clip may")
+            }
+            let steps = Int(samples)
             for step in 0...steps { times.insert(start + (end - start) * Float(step) / Float(steps)) }
         }
         let steps = Set(all.filter { $0.interpolation == "STEP" }.flatMap { $0.times.dropFirst() })

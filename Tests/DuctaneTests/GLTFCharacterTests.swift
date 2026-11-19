@@ -416,6 +416,63 @@ struct GLTFCharacterTests {
         #expect(base.joints(notDrivenBy: try #require(clips.first)) == ["Root/Offset"])
     }
 
+    /// Files that would otherwise stop the program or never finish: a node that is its own ancestor, a joint index that
+    /// is not a number, joints that cannot be put parent first, and a cubic clip a hundred years long.
+    @Test("A malformed glTF character is refused or its clip dropped — never a crash or a hang")
+    func malformed() throws {
+        let folder = try GLTFReaderTests.folder()
+
+        var cycle = Self.centimetreRig(animations: [])
+        var nodes = cycle.json["nodes"] as! [[String: Any]]
+        nodes[3]["children"] = [5, 1]   // the arm parents the root, which is the arm's ancestor
+        cycle.json["nodes"] = nodes
+        #expect(throws: RigLoaderError.self) { try RigLoader.load(url: cycle.write(to: folder, name: "cycle")) }
+        #expect(throws: GLTFError.unreadable(file: "cycle.gltf")) {
+            try ImportedModel.read(gltf: cycle.write(to: folder, name: "cycle"))
+        }
+
+        var notANumber = Self.centimetreRig(animations: [])
+        var meshes = notANumber.json["meshes"] as! [[String: Any]]
+        var primitives = meshes[0]["primitives"] as! [[String: Any]]
+        var attributes = primitives[0]["attributes"] as! [String: Int]
+        attributes["JOINTS_0"] = notANumber.accessor([.nan, 0, 0, 0, 1, 0, 0, 0, 1e30, 0, 0, 0], type: "VEC4")
+        primitives[0]["attributes"] = attributes
+        meshes[0]["primitives"] = primitives
+        notANumber.json["meshes"] = meshes
+        #expect(throws: RigLoaderError.self) {
+            try SkinnedModel.read(url: notANumber.write(to: folder, name: "nan"), vertexDescriptor: layout, semantics: semantics)
+        }
+
+        // The child joint and its parent both outside the scene, the child first: no order puts them parent first.
+        var outside = Builder()
+        outside.append("nodes", ["name": "Hand"])
+        outside.append("nodes", ["name": "Arm", "children": [0]])
+        outside.append("nodes", ["name": "Body", "mesh": 0, "skin": 0])
+        outside.append("meshes", ["primitives": [["attributes": ["POSITION": outside.accessor([0, 0, 0, 1, 0, 0, 0, 1, 0],
+                                                                                               type: "VEC3")]]]])
+        outside.append("skins", ["joints": [0, 1]])
+        outside.json["scenes"] = [["nodes": [2]]]
+        #expect(throws: RigLoaderError.self) { try RigLoader.load(url: outside.write(to: folder, name: "outside")) }
+
+        var long = Self.centimetreRig(animations: ["Swing"])
+        var samplers: [[String: Any]] = []
+        samplers.append(["input": long.accessor([0, 3e9], type: "SCALAR"),
+                         "output": long.accessor([0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0], type: "VEC3"),
+                         "interpolation": "CUBICSPLINE"])
+        var animations = long.json["animations"] as! [[String: Any]]
+        animations.append(["name": "Century", "samplers": samplers,
+                           "channels": [["sampler": 0, "target": ["node": 1, "path": "translation"]]]])
+        long.json["animations"] = animations
+        var warnings: [RigLoader.Warning] = []
+        let rig = try RigLoader.load(url: long.write(to: folder, name: "long")) { warnings.append($0) }
+        #expect(rig.clips.map(\.name) == ["Swing"])
+        guard case .clipDropped(_, "Century", let reason)? = warnings.first else {
+            Issue.record("expected the century-long clip dropped, got \(warnings)")
+            return
+        }
+        #expect(reason.contains("hour"))
+    }
+
     @Test("A damaged glTF character is said as one, by file")
     func damaged() throws {
         let url = try GLTFReaderTests.folder().appending(path: "torn.glb")
