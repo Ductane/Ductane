@@ -723,3 +723,23 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         }
     }
 }
+
+// MARK: Characters standing in a world
+
+public nonisolated extension WorldFile {
+
+    /// **The placements of characters** (``characters``) — figures with a skeleton, stood in the scene — in the order they
+    /// were placed: what a game draws skinned and idling (``Rig/idlePlayhead(staggeredBy:)``), reading each prop's file
+    /// with ``SkinnedModel``, rather than as props.
+    var characterPlacements: [Placement] {
+        let characters = Set(self.characters)
+        return placements.filter { characters.contains($0.prop) }
+    }
+
+    /// **The placements of everything else** — what a game draws as props, the characters left out so a figure is not drawn
+    /// twice, once frozen in its bind pose.
+    var propPlacements: [Placement] {
+        let characters = Set(self.characters)
+        return characters.isEmpty ? placements : placements.filter { !characters.contains($0.prop) }
+    }
+}

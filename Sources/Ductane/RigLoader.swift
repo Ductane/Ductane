@@ -474,3 +474,29 @@ nonisolated extension AnimationClip {
                               jointCount: joints.count))
     }
 }
+
+// MARK: Standing still
+
+public nonisolated extension Rig {
+
+    /// **The clip a figure stands in when nothing moves it**: a standing idle where the file has one (a name holding both
+    /// "idle" and "stand", in any case), else any idle, else whatever clip it carries first; nil for a rig with no clips.
+    ///
+    /// For a character placed in a world and left there — a figure a world editor stood by a door — which a game draws
+    /// breathing rather than frozen in its bind pose, without knowing what its maker named the clips.
+    var idleClip: AnimationClip? {
+        let named = clips.map { ($0, $0.name.lowercased()) }
+        return (named.first { $0.1.contains("idle") && $0.1.contains("stand") }
+            ?? named.first { $0.1.contains("idle") })?.0 ?? clips.first
+    }
+
+    /// **A looping playhead on ``idleClip``, started `index` × ``idleStagger`` seconds in** — so a row of figures placed
+    /// together, the same file each, does not breathe as one. Nil for a rig with no clips.
+    func idlePlayhead(staggeredBy index: Int = 0) -> AnimationPlayhead? {
+        idleClip.map { AnimationPlayhead(clip: $0, skeleton: skeleton, time: Float(index) * Rig.idleStagger) }
+    }
+
+    /// How far apart neighbouring figures' idles start, in seconds: not a fraction of a usual idle's length, so a crowd's
+    /// breaths do not line up again every few figures.
+    static let idleStagger: Float = 0.37
+}
