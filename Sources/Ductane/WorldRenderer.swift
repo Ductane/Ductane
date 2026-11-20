@@ -424,6 +424,12 @@ public final class WorldRenderer: GameLoop {
         var wind: SIMD4<Float> = .zero
     }
 
+    /// `GroundLayers` in the shader: each layer's colour and slice, then how each repeats — sixteen `float4`s, the 256
+    /// bytes of one uniform slot.
+    struct GroundLayerUniforms {
+        var values = [SIMD4<Float>](repeating: .zero, count: 16)
+    }
+
     /// Point lights a frame lights with, nearest the view first — `lightCount` and the two arrays after
     /// `FrameUniforms` in the shader, written straight after it (every field of it is 16-byte aligned).
     static let lightLimit = 16
@@ -475,6 +481,9 @@ public final class WorldRenderer: GameLoop {
     private var propPipeline: MTLRenderPipelineState { surfaces.prop }
     private var groundPipeline: MTLRenderPipelineState {
         surfaceSets[SurfacePipelines.index(weather: drawsWeatherOnGround, seasons: drawsSeasonsOnFoliage)].ground
+    }
+    private var texturedGroundPipeline: MTLRenderPipelineState {
+        surfaceSets[SurfacePipelines.index(weather: drawsWeatherOnGround, seasons: drawsSeasonsOnFoliage)].texturedGround
     }
     private var instancedPipeline: MTLRenderPipelineState { surfaces.instanced }
     /// Snow built up on props (Ductane's `SnowCap`), drawn with their copies.
@@ -660,8 +669,8 @@ public final class WorldRenderer: GameLoop {
         impostorBakeDepthState = bakeDepthState
 
         let table = MTL4ArgumentTableDescriptor()
-        table.maxBufferBindCount = 10   // 0: vertices · 1: object · 2: frame · 3: scattered copies' transforms · 4: the ground's vertices · 5: a liquid's look · 6, 7: footprints and their cells · 8: where puddles gather · 9: where fallen leaves lie
-        table.maxTextureBindCount = 10   // 0: base colour · 1: the sun's shadow cascades · 2: emission · 3–5: a far picture's colour, normals and depth (a liquid's noise and normals at 2, 3) · 6: the solid pass's depth · 7: the weather's cover, for lying snow · 8: where clouds gather, for their shadows · 9: the fog volume
+        table.maxBufferBindCount = 12   // 0: vertices · 1: object · 2: frame · 3: scattered copies' transforms · 4: the ground's vertices · 5: a liquid's look · 6, 7: footprints and their cells · 8: where puddles gather · 9: where fallen leaves lie · 10: the ground's layers · 11: their painted weights
+        table.maxTextureBindCount = 12   // 0: base colour · 1: the sun's shadow cascades · 2: emission · 3–5: a far picture's colour, normals and depth (a liquid's noise and normals at 2, 3) · 6: the solid pass's depth · 7: the weather's cover, for lying snow · 8: where clouds gather, for their shadows · 9: the fog volume · 10, 11: the ground layers' colour and surface
         let shadowTable = MTL4ArgumentTableDescriptor()
         shadowTable.maxBufferBindCount = 2
         shadowTable.maxTextureBindCount = 1
@@ -1407,6 +1416,7 @@ public final class WorldRenderer: GameLoop {
     public func showGround(_ ground: (any WorldGroundSource)?, changed: WorldGroundRegion? = nil) {
         guard let terrain = ground else {
             if terrainKey != nil { terrainKey = nil; terrainShape = nil; terrainMirror = []; terrainHoles = []; groundChunks = nil }
+            if !groundLayers.isEmpty { groundLayers = []; refreshGroundTextures() }
             return
         }
         let key = TerrainKey(lineage: terrain.lineage, revision: terrain.revision)
@@ -1489,6 +1499,7 @@ public final class WorldRenderer: GameLoop {
     }
 
     private func writeMirror(_ terrain: any WorldGroundSource, _ region: WorldGroundRegion) {
+        writeGroundLayers(terrain, region)
         // Written by the ground, optimised (`WorldGroundVertices`): point by point here it was a second and a half of
         // opening a big scene in a Debug build.
         terrainMirror.withUnsafeMutableBufferPointer { vertices in
@@ -1506,6 +1517,117 @@ public final class WorldRenderer: GameLoop {
             let reach = Int((terrain.puddleReach / terrain.spacing).rounded(.up)) + 1
             writePuddleField(terrain, region.expanded(by: reach, within: terrain.resolution))
         }
+    }
+
+    // MARK: Textured layers
+
+    /// The shown ground's layers (``WorldGroundSource/layers``): empty, or while none has a texture, the ground is drawn in
+    /// its vertices' colours.
+    private var groundLayers: [WorldGroundLayer] = []
+    /// Their textures on the GPU, once loaded; nil while none has one, and while the first set loads.
+    private var groundTextures: WorldGroundTextures?
+    /// What ``groundTextures`` holds, or is being loaded with: the texture sets and the slice size.
+    private var groundTexturesKey: GroundTexturesKey?
+    private struct GroundTexturesKey: Equatable { let maps: [WorldGroundTexture]; let size: Int }
+    /// Each point's painted weights, eight bytes a point (``WorldGroundWeights``) — written only while a layer has a texture.
+    private var groundWeightBuffer: MTLBuffer?
+    /// **Loads the ground's layer textures on the calling thread** rather than in the background — for a single frame
+    /// drawn to check a scene, which has no later frame to show them in.
+    public var loadsGroundTexturesAtOnce = false
+    /// Called when the ground's layer textures have loaded, or could not be: an editor redraws, or says which file failed.
+    public var onGroundTexturesLoaded: ((Error?) -> Void)?
+
+    /// Keeps the layers, and while any has a texture, the patch's weights and the textures to draw them with.
+    private func writeGroundLayers(_ terrain: any WorldGroundSource, _ region: WorldGroundRegion) {
+        let layers = terrain.paintedLayers
+        if layers != groundLayers { groundLayers = layers }
+        guard terrain.isTextured else {
+            if groundWeightBuffer != nil {
+                retired.append(([], [groundWeightBuffer!], framesEncoded + FrameRenderer.maxFramesInFlight + 1))
+                groundWeightBuffer = nil
+            }
+            refreshGroundTextures()
+            return
+        }
+        let points = terrain.pointsPerSide * terrain.pointsPerSide
+        let length = points * WorldGroundWeights.bytesPerPoint
+        if groundWeightBuffer == nil || groundWeightBuffer!.length != length {
+            if let old = groundWeightBuffer { retired.append(([], [old], framesEncoded + FrameRenderer.maxFramesInFlight + 1)) }
+            groundWeightBuffer = device.makeBuffer(length: length, options: .storageModeShared)
+            groundWeightBuffer?.label = "Ground Layer Weights"
+            if let buffer = groundWeightBuffer { engine.residencySet.addAllocation(buffer); engine.commitResidency() }
+            if let buffer = groundWeightBuffer {
+                terrain.writeWeights(xs: 0...terrain.resolution, zs: 0...terrain.resolution,
+                                     into: buffer.contents().bindMemory(to: UInt8.self, capacity: length))
+            }
+        } else if let buffer = groundWeightBuffer {
+            // Written in place, as the puddles are: a frame in flight may blend a brushed patch a frame early.
+            terrain.writeWeights(xs: region.x, zs: region.z, into: buffer.contents().bindMemory(to: UInt8.self, capacity: length))
+        }
+        refreshGroundTextures()
+    }
+
+    /// **Loads the layers' textures when the set of them changes** — or the texture quality does — in the background, the
+    /// old ones drawn until the new are ready; at once with ``loadsGroundTexturesAtOnce``.
+    private func refreshGroundTextures() {
+        var maps: [WorldGroundTexture] = []
+        for layer in groundLayers { if let t = layer.texture?.maps, !maps.contains(t) { maps.append(t) } }
+        guard !maps.isEmpty else {
+            if let old = groundTextures {
+                retired.append(([old], old.allocations, framesEncoded + FrameRenderer.maxFramesInFlight + 1))
+            }
+            groundTextures = nil
+            groundTexturesKey = nil
+            return
+        }
+        let key = GroundTexturesKey(maps: maps, size: WorldGroundTextures.size(for: graphics.textureQuality))
+        guard key != groundTexturesKey else { return }
+        groundTexturesKey = key
+        if loadsGroundTexturesAtOnce {
+            adoptGroundTextures(Result { try WorldGroundTextures.make(device: device, textures: maps, size: key.size) }, for: key)
+            return
+        }
+        let device = Loaded.Device(self.device)
+        let wanted = maps, size = key.size
+        Task {
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<WorldGroundTextures, Error> in
+                Result { try WorldGroundTextures.make(device: device.device, textures: wanted, size: size) }
+            }.value
+            adoptGroundTextures(result, for: key)
+        }
+    }
+
+    private func adoptGroundTextures(_ result: Result<WorldGroundTextures, Error>, for key: GroundTexturesKey) {
+        // A newer set was asked for while this one loaded: it is not shown.
+        guard key == groundTexturesKey else { return }
+        switch result {
+        case .success(let fresh):
+            if let old = groundTextures {
+                retired.append(([old], old.allocations, framesEncoded + FrameRenderer.maxFramesInFlight + 1))
+            }
+            groundTextures = fresh
+            engine.residencySet.addAllocations(fresh.allocations)
+            engine.commitResidency()
+            onGroundTexturesLoaded?(nil)
+        case .failure(let error):
+            NSLog("WorldRenderer: the ground's layer textures did not load — \(error)")
+            onGroundTexturesLoaded?(error)
+        }
+    }
+
+    /// The layers as the textured ground pipeline reads them, or nil when the ground is drawn in its colours.
+    private func groundLayerUniforms() -> GroundLayerUniforms? {
+        guard let textures = groundTextures, groundWeightBuffer != nil, groundLayers.contains(where: { $0.texture != nil })
+        else { return nil }
+        var uniforms = GroundLayerUniforms()
+        for (index, layer) in groundLayers.prefix(8).enumerated() {
+            let slice = textures.slice(of: layer.texture).map(Float.init) ?? -1
+            uniforms.values[index] = SIMD4(layer.colour, slice)
+            uniforms.values[8 + index] = SIMD4(1 / (layer.texture?.tileSize ?? WorldGroundTexture.defaultTileSize), 1, 0, 0)
+        }
+        // Layers the ground does not have are never painted, so never read; untextured all the same.
+        for index in min(groundLayers.count, 8)..<8 { uniforms.values[index].w = -1 }
+        return uniforms
     }
 
     private func writePuddleField(_ terrain: any WorldGroundSource, _ region: WorldGroundRegion) {
@@ -1794,11 +1916,15 @@ public final class WorldRenderer: GameLoop {
         weatherTime += Double(deltaTime)
         // The weather wipes footprints as it goes: slowly when calm, fast in falling snow or rain.
         if !footprints.prints.isEmpty { footprints.advance(seconds: Double(deltaTime), weather: frameWeather) }
-        // Wind effects blow the weather's way (``WorldScene/Effect/blown(by:)``) and falling leaves follow the season
-        // (``WorldScene/Effect/inSeason(_:phase:)``).
+        // Wind effects blow the weather's way (``WorldScene/Effect/blown(by:)``), falling leaves follow the season
+        // (``WorldScene/Effect/inSeason(_:phase:)``) and butterflies keep to fine days
+        // (``WorldScene/Effect/living(in:sunElevation:yearPosition:)``).
         let fall = frameFall
+        let daySky = frameDaySky, weather = frameWeather
+        let year = scene.sky.clock.map { daySky.yearPosition + ($0.southern ? 2 : 0) }
+        let elevation = daySky.lighting.elevation
         let shown = scene.effects.map { effect in
-            let blown = effect.blown(by: frameWeather)
+            let blown = effect.blown(by: weather).living(in: weather, sunElevation: elevation, yearPosition: year)
             return fall.map { blown.inSeason($0.fall, phase: $0.phase) } ?? blown
         }
         effects.sync(shown, lighting: frameWeather.lighting(frameDaySky.lighting),
@@ -2398,7 +2524,15 @@ public final class WorldRenderer: GameLoop {
         // lit as if it faced the ground.
         encoder.setFrontFacing(.counterClockwise)
         if let ground = preparedGround, let indices = terrainIndices, !terrainVertices.isEmpty {
-            encoder.setRenderPipelineState(groundPipeline)
+            if let layers = preparedGroundLayers, let textures = groundTextures, let weights = groundWeightBuffer {
+                encoder.setRenderPipelineState(texturedGroundPipeline)
+                argumentTable.setAddress(layers, index: 10)
+                argumentTable.setAddress(weights.gpuAddress, index: 11)
+                argumentTable.setTexture(textures.albedo.gpuResourceID, index: 10)
+                argumentTable.setTexture(textures.surface.gpuResourceID, index: 11)
+            } else {
+                encoder.setRenderPipelineState(groundPipeline)
+            }
             argumentTable.setAddress(terrainVertices[terrainVertexIndex].gpuAddress, index: 0)
             argumentTable.setAddress(ground, index: 1)
             argumentTable.setTexture(textures.white.gpuResourceID, index: 0)
@@ -2505,7 +2639,7 @@ public final class WorldRenderer: GameLoop {
         }
         // **Lightning's bolts** (2026-11-16) — whenever lightning flashes, the weather shown or not, as the flash is: a far
         // strike to the ground under it, a close one to the tallest thing near it.
-        if drawsEffects, frameWeather.settings.lightning > 0 {
+        if drawsEffects, frameWeather.settings.lightning > 0 || !frameWeather.addedStrikes.isEmpty {
             weatherRenderer.drawLightning(frameWeather, into: encoder, frameSlot: frameSlot, viewProjection: viewProjection,
                                           eye: camera.eye, time: weatherTime,
                                           fogDensity: frameWeather.fogDensity(over: scene.sky.fogDensity),
@@ -2633,6 +2767,8 @@ public final class WorldRenderer: GameLoop {
     /// The see-through copies' transforms, one each, farthest first.
     private lazy var seeThroughTransforms = InstanceBuffer(renderer: engine)
     private var preparedGround: UInt64?
+    /// The ground's layers this frame, while it is drawn from their textures (``groundLayerUniforms()``).
+    private var preparedGroundLayers: UInt64?
     /// The ground's uniforms for its coarser chunks: `params.w` 2 tells the shader to read the full ground under them.
     private var preparedCoarseGround: UInt64?
 
@@ -2642,8 +2778,9 @@ public final class WorldRenderer: GameLoop {
     /// The pipelines that draw surfaces with `propFragment` — built once with the weather on surfaces compiled in and once
     /// without (``fullSurfaces``, ``plainSurfaces``).
     private struct SurfacePipelines {
-        let prop, ground, instanced, seeThrough, effectMesh, impostor: MTLRenderPipelineState
-        var all: [AnyObject] { [prop, ground, instanced, seeThrough, effectMesh, impostor] }
+        /// `texturedGround`: the ground drawn from its layers' textures (function constant 2), while a layer has one.
+        let prop, ground, texturedGround, instanced, seeThrough, effectMesh, impostor: MTLRenderPipelineState
+        var all: [AnyObject] { [prop, ground, texturedGround, instanced, seeThrough, effectMesh, impostor] }
         /// Where the set with or without the weather on surfaces and the seasons on foliage is kept.
         static func index(weather: Bool, seasons: Bool) -> Int { (weather ? 1 : 0) + (seasons ? 2 : 0) }
     }
@@ -2658,18 +2795,21 @@ public final class WorldRenderer: GameLoop {
 
     /// **A surface function with the weather on surfaces (constant 0) and the seasons on foliage (constant 1) compiled in
     /// or out** — every function that reads them must be made with both set (``SurfacePipelines``).
-    private static func surfaceFunction(_ name: String, library: MTLLibrary, weather: Bool, seasons: Bool) -> MTL4FunctionDescriptor {
+    private static func surfaceFunction(_ name: String, library: MTLLibrary, weather: Bool, seasons: Bool,
+                                        texturedGround: Bool = false) -> MTL4FunctionDescriptor {
         let base = MTL4LibraryFunctionDescriptor()
         base.library = library
         base.name = name
         let values = MTLFunctionConstantValues()
-        var weather = weather, seasons = seasons
+        var weather = weather, seasons = seasons, textured = texturedGround
         values.setConstantValue(&weather, type: .bool, index: 0)
         values.setConstantValue(&seasons, type: .bool, index: 1)
+        values.setConstantValue(&textured, type: .bool, index: 2)
         let specialized = MTL4SpecializedFunctionDescriptor()
         specialized.functionDescriptor = base
         specialized.constantValues = values
-        specialized.specializedName = name + (weather ? "Weather" : "") + (seasons ? "Seasons" : "") + "Specialized"
+        specialized.specializedName = name + (weather ? "Weather" : "") + (seasons ? "Seasons" : "")
+            + (texturedGround ? "TexturedGround" : "") + "Specialized"
         return specialized
     }
 
@@ -2683,16 +2823,18 @@ public final class WorldRenderer: GameLoop {
         }
         /// A surface function with the weather on surfaces (constant 0) and the seasons on foliage (constant 1) compiled
         /// in or out.
-        func function(_ name: String, compiled: (weather: Bool, seasons: Bool)?) -> MTL4FunctionDescriptor {
+        func function(_ name: String, compiled: (weather: Bool, seasons: Bool)?, textured: Bool = false) -> MTL4FunctionDescriptor {
             guard let compiled else { return function(name) }
-            return surfaceFunction(name, library: library, weather: compiled.weather, seasons: compiled.seasons)
+            return surfaceFunction(name, library: library, weather: compiled.weather, seasons: compiled.seasons,
+                                   texturedGround: textured)
         }
         func pipeline(_ label: String, _ vertex: String, _ fragment: String, _ vertexDescriptor: MTLVertexDescriptor?,
-                      coverage: Bool = false, compiled: (weather: Bool, seasons: Bool)? = nil) throws -> MTLRenderPipelineState {
+                      coverage: Bool = false, compiled: (weather: Bool, seasons: Bool)? = nil,
+                      textured: Bool = false) throws -> MTLRenderPipelineState {
             let d = MTL4RenderPipelineDescriptor()
             d.label = label
-            d.vertexFunctionDescriptor = function(vertex, compiled: compiled)
-            d.fragmentFunctionDescriptor = function(fragment, compiled: compiled)
+            d.vertexFunctionDescriptor = function(vertex, compiled: compiled, textured: textured)
+            d.fragmentFunctionDescriptor = function(fragment, compiled: compiled, textured: textured)
             d.vertexDescriptor = vertexDescriptor
             d.colorAttachments[0].pixelFormat = FrameRenderer.sceneColorPixelFormat
             d.rasterSampleCount = sampleCount
@@ -2737,6 +2879,8 @@ public final class WorldRenderer: GameLoop {
                                    compiled: compiled),
                 ground: try pipeline("Ground" + label, "groundVertex", "propFragment", Self.groundVertexDescriptor(),
                                      compiled: compiled),
+                texturedGround: try pipeline("Textured Ground" + label, "groundVertex", "propFragment",
+                                             Self.groundVertexDescriptor(), compiled: compiled, textured: true),
                 instanced: try pipeline("Scattered Props" + label, "propInstancedVertex", "propFragment",
                                         Self.vertexDescriptor(), coverage: true, compiled: compiled),
                 seeThrough: try compiler.makeRenderPipelineState(descriptor: seeThrough(compiled, label: label),
@@ -2834,6 +2978,8 @@ public final class WorldRenderer: GameLoop {
                 NSLog("WorldRenderer: shadow quality unchanged — \(error)")
             }
         }
+        // The ground's layer textures at the new size too.
+        if groundTexturesKey != nil { refreshGroundTextures() }
         // **Textures at another size: every prop is read again** (`TextureStore.quality` forgets what it loaded).
         if next.textureQuality != textures.quality {
             let before = textures.allocations
@@ -2966,6 +3112,7 @@ public final class WorldRenderer: GameLoop {
         preparedSeeThrough.removeAll(keepingCapacity: true)
         seeThroughCopies.removeAll(keepingCapacity: true)
         preparedGround = nil
+        preparedGroundLayers = nil
         preparedCoarseGround = nil
         preparedImpostors.removeAll(keepingCapacity: true)
         instancedUniformCache.removeAll(keepingCapacity: true)
@@ -3056,6 +3203,7 @@ public final class WorldRenderer: GameLoop {
             preparedGround = write(ObjectUniforms(model: matrix_identity_float4x4, normalMatrix: matrix_identity_float4x4,
                                                   baseColour: SIMD4(1, 1, 1, 1), emissive: .zero,
                                                   params: SIMD4(0.95, 0, 0, 1)))
+            preparedGroundLayers = groundLayerUniforms().flatMap { write($0) }
             if !groundCoarseRanges.isEmpty {
                 preparedCoarseGround = write(ObjectUniforms(model: matrix_identity_float4x4,
                                                             normalMatrix: matrix_identity_float4x4,
@@ -3939,6 +4087,15 @@ public final class WorldRenderer: GameLoop {
     }
 
     /// Writes one object's uniforms into this frame's next slot; its address, or `nil` when the frame is full.
+    /// The ground's layers into a frame's next uniform slot (``GroundLayerUniforms`` is one slot's size).
+    private func write(_ layers: GroundLayerUniforms) -> UInt64? {
+        guard nextSlot < Self.maxObjects, layers.values.count == 16 else { refuseObject(); return nil }
+        let offset = (frameSlot * Self.maxObjects + nextSlot) * Self.objectStride
+        layers.values.withUnsafeBytes { objectBuffer.contents().advanced(by: offset).copyMemory(from: $0.baseAddress!, byteCount: $0.count) }
+        nextSlot += 1
+        return objectBuffer.gpuAddress + UInt64(offset)
+    }
+
     private func write(_ uniforms: ObjectUniforms) -> UInt64? {
         guard nextSlot < Self.maxObjects else { refuseObject(); return nil }
         var uniforms = uniforms

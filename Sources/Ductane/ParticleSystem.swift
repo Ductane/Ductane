@@ -361,8 +361,9 @@ public nonisolated struct ParticleSystem: Sendable {
         public var isAlive: Bool { age < lifetime }
     }
 
-    /// Every kind this system can throw. A burst names one by index.
-    public let recipes: [ParticleRecipe]
+    /// Every kind this system can throw. A burst names one by index. Changed in place only for one that follows the
+    /// sun — the same kinds in the same order, so every particle keeps its recipe.
+    public internal(set) var recipes: [ParticleRecipe]
 
     /// How many can be alive at once.
     public let capacity: Int

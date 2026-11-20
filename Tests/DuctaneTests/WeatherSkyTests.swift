@@ -31,9 +31,21 @@ struct WeatherSkyTests {
         let bolt = LightningBolt.make(strike, cloudBase: 1500, landing: landing)
         #expect(bolt == LightningBolt.make(strike, cloudBase: 1500, landing: landing))
         let trunk = bolt.segments.filter { $0.brightness == 1 }
-        #expect(trunk.count == 128)
+        #expect(trunk.count > 60)
         #expect(try #require(trunk.first).a.y >= 1500)
         #expect(simd_distance(try #require(trunk.last).b, landing) < 1e-3)
+        // **Jagged at the scale it is seen at**: its path well longer than a straight line, and a good share of its
+        // turns sharp — a bolt drawn nearly straight read as a generic streak (2026-11-20).
+        let path = trunk.reduce(Float(0)) { $0 + simd_distance($1.a, $1.b) }
+        #expect(path > simd_distance(try #require(trunk.first).a, landing) * 1.25)
+        let turns = zip(trunk, trunk.dropFirst()).map { acos(min(simd_dot(simd_normalize($0.b - $0.a),
+                                                                            simd_normalize($1.b - $1.a)), 1)) }
+        #expect(Float(turns.filter { $0 > 0.35 }.count) > Float(turns.count) * 0.3)
+        // **Branching**: several branches, and tips fading.
+        #expect(bolt.segments.filter { $0.brightness < 1 }.count > 40)
+        #expect(bolt.segments.contains { $0.brightness < 0.15 })
+        // Within what a renderer draws for a few strikes at once (``WeatherRenderer/maxBoltSegments``).
+        #expect(bolt.segments.count < WeatherRenderer.maxBoltSegments / 3, "\(bolt.segments.count) pieces")
         #expect(bolt.segments.contains { $0.brightness < 1 && $0.width < 1 })
         #expect(bolt != LightningBolt.make(Weather.Strike(time: 0, position: SIMD2(100, 0), seed: 43), cloudBase: 1500,
                                            landing: landing))
@@ -42,6 +54,26 @@ struct WeatherSkyTests {
                                        landing: .zero)
         #expect(sheet.segments.allSatisfy { min($0.a.y, $0.b.y) > 900 })
         #expect(strike.boltBrightness(after: 0) == 1 && strike.boltBrightness(after: 2) == 0)
+    }
+
+    @Test("A game's own strikes come with the seeded ones, under any sky, through a schedule, and are never saved")
+    func addedStrikes() throws {
+        var clear = Weather.clear
+        let mine = Weather.Strike(time: 10, position: SIMD2(300, -400), seed: 9)
+        clear.addedStrikes = [mine]
+        #expect(clear.strikes(from: 9, to: 11) == [mine])
+        #expect(clear.strikes(from: 10.5, to: 12).isEmpty)
+        #expect(clear.flash(at: 10.05, seenFrom: .zero) > 0)
+        var storm = Weather(kind: .storm, severity: 1)
+        storm.addedStrikes = [mine]
+        let both = storm.strikes(from: 0, to: 600)
+        #expect(both.contains(mine) && both.count > 1)
+        #expect(zip(both, both.dropFirst()).allSatisfy { $0.time <= $1.time })
+        var scheduled = clear
+        scheduled.schedule = WeatherSchedule()
+        #expect(scheduled.current(at: 10).addedStrikes == [mine])
+        let back = try JSONDecoder().decode(Weather.self, from: JSONEncoder().encode(clear))
+        #expect(back.addedStrikes.isEmpty)
     }
 
     @Test("A dust storm: dust in the air, the sky its colour, the sun dimmed; its colour kept through a file and a schedule")

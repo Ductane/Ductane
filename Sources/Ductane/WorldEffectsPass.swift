@@ -21,11 +21,12 @@ final class WorldEffectsPass {
     private var emitters: [ParticleEmitter] = []
     private var origins: [SIMD3<Float>] = []
     private var directions: [SIMD3<Float>] = []
-    /// What the system was built from — rebuilt when anything but where an effect stands changes, or the sun moves.
+    /// What the system was built from — rebuilt, and prewarmed, when an effect is added, removed or reshaped. **How many
+    /// a second and which way are not part of it**, nor the sun: those follow in place (``sync(_:lighting:meshes:)``).
     private var built: [Shape] = []
     private var builtSun: SIMD3<Float>?
     private struct Shape: Equatable {
-        let seed: Int; let kind: String; let variety: Int; let rate: Float; let radius: Float; let direction: SIMD3<Float>
+        let seed: Int; let kind: String; let variety: Int; let radius: Float
         let recipe: ParticleRecipe; let followers: [ParticleRecipe]; let followsSun: Bool; let prewarm: Float
     }
     /// The pack meshes the system was built able to draw (``WorldScene/Effect/meshes``).
@@ -81,24 +82,51 @@ final class WorldEffectsPass {
         }
     }
 
-    /// Follows the scene: a new system when an effect is added, removed or changed — prewarmed — and only new origins
+    /// Follows the scene: a new system when an effect is added, removed or reshaped — prewarmed — and only new origins
     /// when one is dragged, so a swarm follows its handle rather than starting again.
+    ///
+    /// **A rate, a direction or the sun changing follows in place** (2026-11-19): the emitters' rates and the sun-led
+    /// recipes are changed where they stand, and nothing is prewarmed. With a scene's clock running, falling leaves'
+    /// rate moves with the season and the sun with the hour on every frame; rebuilt for either, every effect was
+    /// prewarmed again every frame — a debug build spent seconds a frame on a valley with sunbeams and falling leaves.
     ///
     /// **Each effect's recipe and its followers** (``WorldScene/Effect/followers``: a frog's sit, a bubble's splash) go in
     /// one after another, their `then` shifted to where they landed. **A recipe drawn as a pack mesh** (`mesh`) keeps it
     /// when `meshes` holds it — the renderer draws those (``meshCopies()``) — and is a sprite or a disc otherwise.
     func sync(_ effects: [WorldScene.Effect], lighting: DaySky.Lighting, meshes: Set<String> = []) {
         let shapes = effects.map {
-            Shape(seed: $0.seed, kind: $0.kind, variety: $0.variety, rate: $0.rate, radius: $0.radius, direction: $0.direction,
-                  recipe: $0.recipe, followers: $0.followers, followsSun: $0.followsSun, prewarm: $0.prewarm)
+            Shape(seed: $0.seed, kind: $0.kind, variety: $0.variety, radius: $0.radius, recipe: $0.recipe,
+                  followers: $0.followers, followsSun: $0.followsSun, prewarm: $0.prewarm)
         }
         origins = effects.map(\.position)
         directions = effects.map(\.direction)
         let sun = effects.contains { $0.followsSun } ? lighting.direction : nil
-        guard shapes != built || sun != builtSun || meshes != builtMeshes else { return }
+        if shapes == built, meshes == builtMeshes, emitters.count == effects.count {
+            for (index, effect) in effects.enumerated() where emitters[index].rate != effect.rate {
+                emitters[index].rate = effect.rate
+            }
+            if sun != builtSun {
+                builtSun = sun
+                system.recipes = Self.recipes(for: effects, lighting: lighting, meshes: meshes).recipes
+            }
+            return
+        }
         built = shapes
         builtSun = sun
         builtMeshes = meshes
+        let (recipes, firsts) = Self.recipes(for: effects, lighting: lighting, meshes: meshes)
+        builds += 1
+        system = ParticleSystem(recipes: recipes, capacity: Self.capacity)
+        emitters = effects.enumerated().map { index, effect in
+            ParticleEmitter(recipe: firsts[index], rate: effect.rate, seedBase: effect.seed)
+        }
+        let longest = effects.map(\.prewarm).max() ?? 0
+        ParticleEmitter.prewarm(&emitters, at: origins, directions: directions, into: &system, seconds: longest)
+    }
+
+    /// Every effect's recipes in order, and where each effect's first is.
+    private static func recipes(for effects: [WorldScene.Effect], lighting: DaySky.Lighting,
+                                meshes: Set<String>) -> (recipes: [ParticleRecipe], firsts: [Int]) {
         var recipes: [ParticleRecipe] = [], firsts: [Int] = []
         for effect in effects {
             let offset = recipes.count
@@ -110,13 +138,11 @@ final class WorldEffectsPass {
                 recipes.append((effect.followsSun ? recipe.shafts(of: lighting) : recipe).shiftingThen(by: offset))
             }
         }
-        system = ParticleSystem(recipes: recipes, capacity: Self.capacity)
-        emitters = effects.enumerated().map { index, effect in
-            ParticleEmitter(recipe: firsts[index], rate: effect.rate, seedBase: effect.seed)
-        }
-        let longest = effects.map(\.prewarm).max() ?? 0
-        ParticleEmitter.prewarm(&emitters, at: origins, directions: directions, into: &system, seconds: longest)
+        return (recipes, firsts)
     }
+
+    /// How many times the system has been built and prewarmed — a test's way to see that a change followed in place.
+    private(set) var builds = 0
 
     func step(deltaTime: Float) {
         guard !emitters.isEmpty else { return }

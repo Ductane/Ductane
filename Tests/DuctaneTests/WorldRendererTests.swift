@@ -104,6 +104,30 @@ struct WorldRendererTests {
         #expect(smoke.blown(by: weather) == smoke, "smoke is not one that moves with the wind here")
     }
 
+    @Test("Butterflies keep to fine days: full on a clear summer afternoon, fewer in spring, none in winter, snow, rain or at night")
+    func butterfliesKeepToFineDays() {
+        let butterflies = WorldScene.Effect(kind: "butterflies", position: .zero, rate: 10, radius: 4,
+                                            recipe: WorldRendererTests.recipe, keepsToFineDays: true)
+        let afternoon: Float = 0.6                                           // the sun about 34° up
+        func rate(_ weather: Weather, sun: Float = afternoon, year: Double? = 2) -> Float {
+            butterflies.living(in: weather, sunElevation: sun, yearPosition: year).rate
+        }
+        #expect(rate(.clear) == 10, "a clear summer afternoon changes nothing")
+        #expect(rate(.clear, year: nil) == 10, "a scene with no calendar has no season")
+        #expect(rate(.clear, year: 1) > 2 && rate(.clear, year: 1) < 8, "spring has fewer")
+        #expect(rate(.clear, year: 0) == 0, "winter has none")
+        #expect(rate(.clear, year: 4) == 0 && rate(.clear, year: 6) == 10, "the calendar wraps")
+        #expect(rate(.clear, sun: -0.2) == 0, "night has none")
+        #expect(rate(Weather(kind: .rain, severity: 0.6)) == 0, "rain has none")
+        #expect(rate(Weather(kind: .storm, severity: 0.8)) == 0)
+        #expect(rate(Weather(kind: .dust, severity: 0.8)) == 0)
+        var snowy = Weather.clear
+        snowy.lyingSnow = 0.8
+        #expect(rate(snowy) == 0, "lying snow has none")
+        let smoke = WorldScene.Effect(kind: "smoke", position: .zero, rate: 4, radius: 1, recipe: WorldRendererTests.recipe)
+        #expect(smoke.living(in: snowy, sunElevation: -0.5, yearPosition: 0) == smoke, "only what keeps to fine days")
+    }
+
     @Test("A frame lights with the lights nearest the view, nearest first, none out of reach")
     func nearestLights() {
         let lights = [WorldScene.Light(position: SIMD3(50, 0, 0), colour: .one, intensity: 1, reach: 5),

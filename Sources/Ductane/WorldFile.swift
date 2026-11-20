@@ -480,9 +480,15 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         /// layout): the ground's hollows and brushed puddles, worked out by the editor. A renderer fills them to the
         /// weather's ``Weather/puddles``, highest first. Nil when none can form.
         public var puddles: String?
+        /// **Each layer's colour**, linear RGB, in ``layers``' order — what an untextured layer is drawn with beside textured
+        /// ones. Nil when no layer has a texture.
+        public var layerColours: [[Float]]?
+        /// **Each layer's texture set**, in ``layers``' order, nil for a layer that has none (``Texture``) — the ground drawn
+        /// from them, blended by ``weights``. Nil when no layer has one.
+        public var textures: [Texture?]?
         public init(size: Float, resolution: Int, heights: String = "game/ground.f32", colours: String = "game/ground.rgb",
                     holes: String? = nil, weights: String? = nil, layers: [String] = [], softLayers: [Int]? = nil,
-                    puddles: String? = nil) {
+                    puddles: String? = nil, layerColours: [[Float]]? = nil, textures: [Texture?]? = nil) {
             self.size = size
             self.resolution = resolution
             self.heights = heights
@@ -492,6 +498,38 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
             self.layers = layers
             self.softLayers = softLayers
             self.puddles = puddles
+            self.layerColours = layerColours
+            self.textures = textures
+        }
+
+        /// **A ground layer's texture set** (``WorldGroundTexture``): its files in the package, and metres a repeat.
+        public struct Texture: Codable, Equatable, Sendable {
+            /// The colour map.
+            public var map: String
+            public var normal: String?
+            /// True when the normal map's green points down the image (DirectX's way); nil or false, up (OpenGL's).
+            public var normalIsDirectX: Bool?
+            public var roughness: String?
+            public var occlusion: String?
+            /// Occlusion, roughness and metalness in red, green and blue.
+            public var packed: String?
+            public var height: String?
+            public var tileSize: Float
+
+            public init(map: String, normal: String? = nil, normalIsDirectX: Bool? = nil, roughness: String? = nil,
+                        occlusion: String? = nil, packed: String? = nil, height: String? = nil, tileSize: Float) {
+                self.map = map
+                self.normal = normal
+                self.normalIsDirectX = normalIsDirectX
+                self.roughness = roughness
+                self.occlusion = occlusion
+                self.packed = packed
+                self.height = height
+                self.tileSize = tileSize
+            }
+
+            /// Every file it names.
+            public var files: [String] { [map] + [normal, roughness, occlusion, packed, height].compactMap { $0 } }
         }
 
         public init(from decoder: Decoder) throws {
@@ -505,10 +543,13 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
             layers = try c.decodeIfPresent([String].self, forKey: .layers) ?? []
             softLayers = (try? c.decodeIfPresent([Int].self, forKey: .softLayers))?.filter { (0..<Self.layerCount).contains($0) }
             puddles = try? c.decodeIfPresent(String.self, forKey: .puddles)
+            // Read leniently: a world from an editor that wrote these differently still opens, untextured.
+            layerColours = try? c.decodeIfPresent([[Float]].self, forKey: .layerColours)
+            textures = try? c.decodeIfPresent([Texture?].self, forKey: .textures)
         }
 
         private enum CodingKeys: String, CodingKey {
-            case size, resolution, heights, colours, holes, weights, layers, softLayers, puddles
+            case size, resolution, heights, colours, holes, weights, layers, softLayers, puddles, layerColours, textures
         }
 
         /// **How soft each point is**, 0…1: the share of its weights in soft layers — where footprints show.

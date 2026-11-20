@@ -151,6 +151,7 @@ public nonisolated struct WeatherSchedule: Sendable, Equatable, Codable {
                               puddles: max(base.wetness, wet.puddles), cloudShape: base.cloudShape, sway: base.sway,
                               dustColour: base.dustColour, groundFog: base.groundFog)
         weather.windTurn = now.windTurn
+        weather.addedStrikes = base.addedStrikes
         guard change > 0, time - now.start < change else { return weather }
         let before = spell(now.index - 1)
         let x = Float(min(max((time - now.start) / change, 0), 1))

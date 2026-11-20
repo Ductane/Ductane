@@ -216,11 +216,14 @@ public nonisolated struct WorldScene: Equatable, Sendable {
         public var blowsWithWind: Bool
         /// **The look falling leaves take once trees have turned** — nil for anything but leaves (``inSeason(_:phase:)``).
         public var turnedVariety: Int?
+        /// **Whether it keeps to fine days** — butterflies: fewer in spring and autumn, none in winter or where snow lies,
+        /// hidden in rain, snow, storms and dust, and at night (``living(in:sunElevation:yearPosition:)``).
+        public var keepsToFineDays: Bool
 
         public init(kind: String, variety: Int = 0, position: SIMD3<Float>, rate: Float, radius: Float,
                     direction: SIMD3<Float> = SIMD3(0, 1, 0), prewarm: Float = 0, followsSun: Bool = false,
                     recipe: ParticleRecipe, followers: [ParticleRecipe] = [], seed: Int = 0, blowsWithWind: Bool = false,
-                    turnedVariety: Int? = nil) {
+                    turnedVariety: Int? = nil, keepsToFineDays: Bool = false) {
             self.kind = kind
             self.variety = variety
             self.position = position
@@ -234,6 +237,7 @@ public nonisolated struct WorldScene: Equatable, Sendable {
             self.seed = seed
             self.blowsWithWind = blowsWithWind
             self.turnedVariety = turnedVariety
+            self.keepsToFineDays = keepsToFineDays
         }
 
         /// How thick an effect may be: the most a dense one throws.
@@ -263,6 +267,40 @@ public nonisolated struct WorldScene: Equatable, Sendable {
             changed.rate = rate * season.rate
             if season.turned { changed.variety = turnedVariety }
             return changed
+        }
+
+        /// **As the day has it, for one that keeps to fine days** (owner, 2026-11-20: butterflies were flying over a winter
+        /// valley's snow): its rate times how fine the day is, 1 on a clear summer afternoon, nothing in winter, under
+        /// lying or falling snow, in rain, in a gale or dust, or at night — easing in and out, so a swarm thins rather than
+        /// vanishing. `yearPosition` is the northern calendar's (0 midwinter … 2 midsummer), already turned for the
+        /// southern hemisphere; nil for a scene with no calendar, which has no season. Anything else as it is.
+        public func living(in weather: Weather, sunElevation: Float, yearPosition: Double?) -> Effect {
+            guard keepsToFineDays else { return self }
+            var changed = self
+            changed.rate = rate * Self.fineness(of: weather, sunElevation: sunElevation, yearPosition: yearPosition)
+            return changed
+        }
+
+        /// **How fine a day is for butterflies**, 0…1: the season (summer 1, spring and autumn a half, winter none), and
+        /// none under lying or falling snow, rain, a gale or dust, or with the sun below the horizon.
+        public static func fineness(of weather: Weather, sunElevation: Float, yearPosition: Double?) -> Float {
+            func smooth(_ a: Float, _ b: Float, _ x: Float) -> Float {
+                let t = min(max((x - a) / (b - a), 0), 1)
+                return t * t * (3 - 2 * t)
+            }
+            var fine: Float = 1
+            if let yearPosition {
+                let y = Float(yearPosition.truncatingRemainder(dividingBy: 4) + (yearPosition < 0 ? 4 : 0))
+                let fromSummer = min(abs(y - 2), 4 - abs(y - 2))      // 0 midsummer, 1 spring or autumn, 2 midwinter
+                fine *= 1 - smooth(0.5, 1.6, fromSummer)
+            }
+            let settings = weather.settings
+            fine *= 1 - smooth(0.05, 0.3, weather.lyingSnow)
+            fine *= 1 - smooth(0.03, 0.25, settings.precipitation)
+            fine *= 1 - smooth(8, 14, settings.windSpeed)
+            fine *= 1 - smooth(0.05, 0.3, settings.dust)
+            fine *= smooth(-0.035, 0.09, sunElevation)              // about 2° below the horizon to 5° above
+            return fine
         }
 
         /// Every mesh its particles are drawn as, by name.
@@ -330,7 +368,7 @@ public nonisolated extension WorldScene {
                    rate: effect.rate, radius: effect.radius, direction: WorldScene.vector(effect.direction, or: SIMD3(0, 1, 0)),
                    prewarm: effect.prewarm, followsSun: effect.followsSun, recipe: effect.recipe,
                    followers: effect.followers, seed: index * 1_000, blowsWithWind: false,
-                   turnedVariety: effect.kind == "leaves" ? 1 : nil)
+                   turnedVariety: effect.kind == "leaves" ? 1 : nil, keepsToFineDays: effect.kind == "butterflies")
         }
         var meshes: [String: URL] = [:]
         for (name, prop) in world.effectMeshes where urls.indices.contains(prop) { meshes[name] = urls[prop] }

@@ -73,7 +73,7 @@ public final class WeatherRenderer {
     /// A bolt's pieces, a stretch per frame in flight.
     private let boltBuffer: MTLBuffer
     /// The most pieces of bolt drawn in a frame — a few strikes at once.
-    public nonisolated static let maxBoltSegments = 4096
+    public nonisolated static let maxBoltSegments = 12_288   // a few crooked, branching strikes at once (2026-11-20)
     private static let boltStride = 32
     private let depthState: MTLDepthStencilState
     private let argumentTable: MTL4ArgumentTable

@@ -115,6 +115,10 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
     /// sets; 0 for weather as set. Never saved. The clouds aloft travel along the world's heading (``prevailingHeading``),
     /// whatever the wind at the ground does.
     public var windTurn: Float = 0
+    /// **Strikes a game adds of its own** (2026-11-20) — a bolt on cue for a story beat, a cutscene or a trailer — drawn,
+    /// flashed and heard exactly as the seeded ones are (``strikes(from:to:)``), whatever ``Settings/lightning`` says, even
+    /// under a clear sky. Never saved: what a moment wants, not what a world is.
+    public var addedStrikes: [Strike] = []
     /// **The world's prevailing wind**: ``windHeading`` without a schedule's turn — the heading set for the world.
     public var prevailingHeading: Float { windHeading - windTurn }
 
@@ -243,14 +247,16 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
         light.skyLight = simd_mix(sky, grey(sky, lost * 0.03), SIMD3(repeating: cover)) * (1 - 0.3 * cover) * darker
         light.ground = base.ground * (1 - 0.5 * cover) * darker
         light.colour *= darker
-        // **Dust**: the sky and the distance the dust's colour, the sun dimmed and reddened through it.
+        // **Dust**: the sky and the distance the dust's colour, the sun dimmed and reddened through it — and the sky
+        // darker as the dust thickens, as a storm's sky is: kept as bright as the clear horizon, a heavy storm drew as
+        // pale white haze rather than brown (2026-11-20).
         if s.dust > 0 {
             let d = s.dust
-            let haze = dustColour * Self.luminance(light.horizon) / max(Self.luminance(dustColour), 0.05)
-            light.horizon = simd_mix(light.horizon, haze * 1.1, SIMD3(repeating: d * 0.9))
-            light.zenith = simd_mix(light.zenith, haze * 0.8, SIMD3(repeating: d * 0.75))
+            let haze = dustColour * Self.luminance(light.horizon) / max(Self.luminance(dustColour), 0.05) * (1 - 0.8 * d)
+            light.horizon = simd_mix(light.horizon, haze * 1.1, SIMD3(repeating: min(d * 1.1, 1)))
+            light.zenith = simd_mix(light.zenith, haze * 0.8, SIMD3(repeating: min(d * 1.0, 1)))
             light.colour *= simd_mix(SIMD3(repeating: 1), dustColour / max(simd_reduce_max(dustColour), 0.05),
-                                     SIMD3(repeating: d * 0.7)) * (1 - 0.55 * d)
+                                     SIMD3(repeating: d * 0.85)) * (1 - 0.7 * d)
             light.skyLight = simd_mix(light.skyLight, haze * 0.6, SIMD3(repeating: d * 0.5))
         }
         if flash > 0 {
@@ -346,8 +352,16 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
     /// **Every strike from `start` up to `end`**, seconds on the weather's clock — the same for the same seed, whoever
     /// asks and however the span is cut up.
     public func strikes(from start: Double, to end: Double) -> [Strike] {
+        guard end > start, start.isFinite, end.isFinite else { return [] }
+        let added = addedStrikes.filter { $0.time >= start && $0.time < end }
+        let seeded = seededStrikes(from: start, to: end)
+        return added.isEmpty ? seeded : (seeded + added).sorted { $0.time < $1.time }
+    }
+
+    /// The strikes that follow from ``seed`` and ``Settings/lightning``.
+    private func seededStrikes(from start: Double, to end: Double) -> [Strike] {
         let rate = settings.lightning
-        guard rate > 0, end > start, start.isFinite, end.isFinite else { return [] }
+        guard rate > 0 else { return [] }
         let chance = Double(min(rate / 60, 1)) * Self.slot
         var strikes: [Strike] = []
         var n = Int64(max((start / Self.slot).rounded(.down), -9e15))

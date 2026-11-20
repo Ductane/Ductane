@@ -10,7 +10,9 @@ import simd
 /// every player sees the same bolt. ``WeatherRenderer/drawLightning(_:into:frameSlot:viewProjection:eye:time:fogDensity:pixelAngle:cloudBase:landing:)``
 /// draws it as glowing ribbons for the half second the strike flickers.
 public nonisolated struct LightningBolt: Sendable, Equatable {
-    /// One straight piece: its ends, how wide it is (metres), and how bright against the trunk (1).
+    /// One straight piece: its ends, how wide its core is (metres), and how bright against the trunk (1). The core is
+    /// thin — a bolt's channel is centimetres across, and wider it drew a near strike as a fat beam (2026-11-20); the
+    /// shader keeps it at least a pixel or two, so a far one still reads.
     public struct Segment: Sendable, Equatable {
         public var a: SIMD3<Float>
         public var b: SIMD3<Float>
@@ -23,6 +25,11 @@ public nonisolated struct LightningBolt: Sendable, Equatable {
     /// **The bolt of `strike`**: from `cloudBase` metres up down to `landing` — a renderer's choice of where it lands, the
     /// tallest thing near a close strike or the ground under a far one — or, in the clouds, a kilometre or two along under
     /// their base.
+    ///
+    /// **Shaped as lightning forms (2026-11-20)**: a stepped leader — short straight pieces, each turned sharply from the
+    /// last, the whole wandering yet homing on where it lands — with branches forking down off its upper part, forking
+    /// again, fading toward their tips. A line broken by midpoint displacement, as it was first made, stayed nearly
+    /// straight seen from the ground: its turns shrink with each halving, so it never kinks at the scale a bolt is seen at.
     public static func make(_ strike: Weather.Strike, cloudBase: Float, landing: SIMD3<Float>) -> LightningBolt {
         var random = SplitMix(seed: UInt64(strike.seed) &+ 0x5EED)
         var segments: [Segment] = []
@@ -40,55 +47,97 @@ public nonisolated struct LightningBolt: Sendable, Equatable {
                           landing.z + (random.unit() - 0.5) * 500)
             end = landing
         }
-        let trunk = jagged(from: start, to: end, depth: 7, roughness: 0.22, random: &random)
-        append(trunk, width: strike.inCloud ? 2 : 1.4, brightness: 1, to: &segments)
-        // **Branches**: off the trunk's upper part, heading down and away, thinner and dimmer, a few forking again.
         let span = simd_distance(start, end)
-        for (i, point) in trunk.enumerated() where i > 2 && i < trunk.count * 3 / 4 {
-            guard random.unit() < 0.14 else { continue }
+        // About one step every 45 m of the bolt: a kilometre and a half is some thirty-odd turns.
+        let steps = max(Int(span / 45), 12)
+        let trunk = leader(from: start, to: end, steps: steps, kink: 0.75, random: &random)
+        append(trunk, width: strike.inCloud ? 0.5 : 0.35, brightness: 1, taper: 0, to: &segments)
+        // **Branches**: all the way down, most from the upper part, heading down (or, in the clouds, along) and away,
+        // thinner and dimmer, a share forking again — and each fading toward its tip, as a branch the return stroke never
+        // reached does. Down to near the ground, so a strike close by, whose top is out of sight, still forks where it is
+        // seen (2026-11-20).
+        let top = trunk.count - 3
+        for i in 1..<max(top, 2) {
+            let low = Float(i) / Float(trunk.count)
+            // The chance is per length of channel (one in three every 22 m near the top), so how finely it is drawn
+            // changes nothing.
+            let per = simd_distance(trunk[i - 1], trunk[i]) / 22
+            guard random.unit() < (strike.inCloud ? 0.3 : 0.3 - 0.18 * low) * per else { continue }
+            let point = trunk[i]
+            let onward = simd_normalize(trunk[min(i + 1, trunk.count - 1)] - point + 1e-5)
             let away = simd_normalize(SIMD3(random.unit() - 0.5, 0, random.unit() - 0.5) + 1e-4)
-            let down: Float = strike.inCloud ? (random.unit() - 0.5) * 0.4 : -(0.5 + random.unit() * 0.6)
-            let length = span * (0.08 + random.unit() * 0.2)
-            let tip = point + simd_normalize(away + SIMD3(0, down, 0)) * length
-            let branch = jagged(from: point, to: tip, depth: 5, roughness: 0.25, random: &random)
-            append(branch, width: 0.7, brightness: 0.45, to: &segments)
-            if random.unit() < 0.35, branch.count > 4 {
-                let from = branch[branch.count / 2]
-                let twig = jagged(from: from, to: from + simd_normalize(SIMD3(-away.z, down, away.x)) * length * 0.4,
-                                  depth: 4, roughness: 0.25, random: &random)
-                append(twig, width: 0.4, brightness: 0.25, to: &segments)
+            let down: Float = strike.inCloud ? (random.unit() - 0.5) * 0.3 : -(0.9 + random.unit() * 1.1)
+            let heading = simd_normalize(onward * 0.6 + away * 0.8 + SIMD3(0, down, 0))
+            let length = span * (0.1 + random.unit() * 0.32) * (1 - Float(i) / Float(trunk.count) * 0.5)
+            let branch = leader(from: point, to: point + heading * length, steps: max(Int(length / 22), 6),
+                                kink: 0.55, random: &random)
+            append(branch, width: 0.2, brightness: 0.5, taper: 0.8, to: &segments)
+            for j in 1..<max(branch.count - 2, 2) where random.unit() < 0.16 * simd_distance(branch[j - 1], branch[j]) / 15 {
+                let from = branch[j]
+                let side = simd_normalize(SIMD3(-heading.z, 0, heading.x) * (random.unit() < 0.5 ? -1 : 1) * 0.7
+                                          + heading * 0.6 + SIMD3(0, down * 0.8, 0))
+                let twigLength = length * (0.2 + random.unit() * 0.3)
+                let twig = leader(from: from, to: from + side * twigLength, steps: max(Int(twigLength / 18), 4),
+                                  kink: 0.55, random: &random)
+                append(twig, width: 0.12, brightness: 0.28 * (1 - Float(j) / Float(branch.count)), taper: 0.85,
+                       to: &segments)
             }
         }
         return LightningBolt(segments: segments)
     }
 
-    /// A line from `a` to `b` broken by midpoint displacement into `2^depth` pieces, each moved across by up to
-    /// `roughness` of its length.
-    static func jagged(from a: SIMD3<Float>, to b: SIMD3<Float>, depth: Int, roughness: Float,
+    /// **A stepped leader from `a` to `b`**: `steps` straight pieces, each the way still to go shared over the steps
+    /// left — so it always arrives — turned off that line by up to about `kink` radians, a turn that partly carries on to
+    /// the next piece so the path wanders rather than shivers. Then **each piece is a smaller leader of its own**, kinked
+    /// as sharply at its own size — lightning is as crooked close to as from afar, so a strike near enough that only its
+    /// last stretch is in view is still a zigzag, not a line with a bend (2026-11-20).
+    static func leader(from a: SIMD3<Float>, to b: SIMD3<Float>, steps: Int, kink: Float,
                        random: inout SplitMix) -> [SIMD3<Float>] {
-        var points = [a, b]
-        for _ in 0..<depth {
-            var next: [SIMD3<Float>] = [points[0]]
-            for i in 1..<points.count {
-                let p = points[i - 1], q = points[i]
-                let d = q - p
-                let length = simd_length(d)
-                var across = simd_cross(d, SIMD3(0, 1, 0))
-                if simd_length(across) < 1e-4 { across = SIMD3(1, 0, 0) }
-                across = simd_normalize(across)
-                let other = simd_normalize(simd_cross(d, across) + 1e-6)
-                let shift = across * (random.unit() - 0.5) * 2 + other * (random.unit() - 0.5)
-                next.append((p + q) / 2 + shift * length * roughness)
-                next.append(q)
-            }
-            points = next
+        let coarse = stepped(from: a, to: b, steps: steps, kink: kink, random: &random)
+        var fine: [SIMD3<Float>] = [coarse[0]]
+        for i in 1..<coarse.count {
+            let piece = simd_distance(coarse[i - 1], coarse[i])
+            let parts = min(max(Int(piece / 8), 2), 6)
+            fine += stepped(from: coarse[i - 1], to: coarse[i], steps: parts, kink: kink * 1.2, random: &random).dropFirst()
+        }
+        return fine
+    }
+
+    /// One level of a leader: `steps` kinked pieces from `a` that always arrive at `b`.
+    static func stepped(from a: SIMD3<Float>, to b: SIMD3<Float>, steps: Int, kink: Float,
+                        random: inout SplitMix) -> [SIMD3<Float>] {
+        var points = [a]
+        var p = a
+        var drift = SIMD2<Float>(0, 0)
+        for i in 0..<steps {
+            let left = steps - i
+            if left == 1 { points.append(b); break }
+            let base = (b - p) / Float(left)
+            let length = simd_length(base)
+            guard length > 1e-4 else { points.append(b); break }
+            let forward = base / length
+            var across = simd_cross(forward, SIMD3(0, 1, 0))
+            if simd_length(across) < 1e-3 { across = SIMD3(1, 0, 0) }
+            across = simd_normalize(across)
+            let other = simd_normalize(simd_cross(forward, across))
+            // Mostly small turns, now and then a sharp one — lightning's angles are not evenly spread.
+            let sharp: Float = random.unit() < 0.18 ? 2.2 : 1
+            let turn = SIMD2(random.unit() - 0.5, random.unit() - 0.5) * 2 * kink * sharp
+            drift = drift * 0.45 + turn
+            p += base + (across * drift.x + other * drift.y * 0.7) * length
+            points.append(p)
         }
         return points
     }
 
-    static func append(_ points: [SIMD3<Float>], width: Float, brightness: Float, to segments: inout [Segment]) {
+    /// The pieces between `points`, dimming by `taper` (0 none, 1 to nothing) from the first to the last.
+    static func append(_ points: [SIMD3<Float>], width: Float, brightness: Float, taper: Float,
+                       to segments: inout [Segment]) {
+        guard points.count > 1 else { return }
         for i in 1..<points.count {
-            segments.append(Segment(a: points[i - 1], b: points[i], width: width, brightness: brightness))
+            let along = Float(i - 1) / Float(max(points.count - 2, 1))
+            segments.append(Segment(a: points[i - 1], b: points[i], width: width * (1 - taper * along * 0.5),
+                                    brightness: brightness * (1 - taper * along)))
         }
     }
 

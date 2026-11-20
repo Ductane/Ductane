@@ -61,6 +61,154 @@ constant bool weatherOnSurfaces = is_function_constant_defined(weatherOnSurfaces
 constant bool seasonsOnFoliageConstant [[function_constant(1)]];
 constant bool seasonsOnFoliage = is_function_constant_defined(seasonsOnFoliageConstant) ? seasonsOnFoliageConstant : true;
 
+/// **Whether the ground is drawn from its layers' textures** (function constant 2; ``WorldRenderer``'s textured ground
+/// pipelines): only the ground's pipeline is made with it, and only drawn with it while a layer has a texture — an untextured
+/// ground keeps the painted colours in its vertices and pays nothing for this.
+constant bool texturedGroundConstant [[function_constant(2)]];
+constant bool texturedGround = is_function_constant_defined(texturedGroundConstant) ? texturedGroundConstant : false;
+
+/// Must match `WorldRenderer.GroundLayerUniforms`: the ground's eight layers as its textured pipeline draws them.
+struct GroundLayers {
+    /// rgb the layer's colour, linear — what it is drawn as without a texture; w its slice in the arrays, −1 for none.
+    float4 colour[8];
+    /// x repeats a metre (1 / its tile size); y how strongly its normal map bends the light; zw unused.
+    float4 params[8];
+};
+
+/// **A textured layer's surface at a point**: colour and height, normal, roughness and occlusion.
+struct LayerSample {
+    float3 albedo;
+    float height;
+    float3 normal;
+    float roughness;
+    float occlusion;
+};
+
+/// **A layer's maps from above, with no repeat to be seen** (Inigo Quilez, *Texture Repetition*, technique 3): a smooth
+/// noise over the ground picks, patch by patch, one of eight offsets into the texture, and neighbouring patches blend
+/// where they meet — the blend leaning toward whichever is darker, as a material's crevices would — so the same tile is
+/// never laid out in a grid. Explicit gradients, since the offsets would otherwise break the mip choice at every seam.
+static void untiled(texture2d_array<float> albedoMap, texture2d_array<float> surfaceMap, sampler s, uint slice, float2 uv,
+                    float2 dx, float2 dy, thread float4 &albedo, thread float4 &surface) {
+    float k = duValueNoise(uv * 0.23);
+    float l = k * 8.0, f = fract(l);
+    float ia = floor(l), ib = ia + 1.0;
+    float2 offA = sin(float2(3.0, 7.0) * ia), offB = sin(float2(3.0, 7.0) * ib);
+    gradient2d g(dx, dy);
+    float4 a1 = albedoMap.sample(s, uv + offA, slice, g), a2 = albedoMap.sample(s, uv + offB, slice, g);
+    float t = smoothstep(0.2, 0.8, f - 0.1 * dot(a1.rgb - a2.rgb, float3(1.0)));
+    albedo = mix(a1, a2, t);
+    surface = mix(surfaceMap.sample(s, uv + offA, slice, g), surfaceMap.sample(s, uv + offB, slice, g), t);
+}
+
+/// **One layer, sampled the way its slope wants** (`params.x` repeats a metre): from above on gentle ground, and from the
+/// sides too where it steepens — triplanar — so rock on a cliff is not smeared down it. Normals are blended by the UDN
+/// method (Ben Golus, *Normal Mapping for a Triplanar Shader*), every map stored with green toward +z. The ground's
+/// derivatives come in from outside (`dpdx`, `dpdy`): a layer is sampled only where it is painted, and derivatives taken
+/// in a branch some pixels skip are undefined.
+static LayerSample sampleLayer(texture2d_array<float> albedoMap, texture2d_array<float> surfaceMap, sampler s, uint slice,
+                               float scale, float bend, float3 p, float3 n, float3 dpdx, float3 dpdy) {
+    float3 blend = pow(abs(n), float3(4.0));
+    blend /= max(blend.x + blend.y + blend.z, 1e-4);
+    bool sides = blend.y < 0.97;
+    float4 aY, sY;
+    untiled(albedoMap, surfaceMap, s, slice, p.xz * scale, dpdx.xz * scale, dpdy.xz * scale, aY, sY);
+    LayerSample out;
+    float3 tY = float3((sY.xy * 2.0 - 1.0) * bend, 0);
+    if (!sides) {
+        out.albedo = aY.rgb;
+        out.height = aY.a;
+        out.normal = normalize(float3(tY.x + n.x, n.y, tY.y + n.z));
+        out.roughness = sY.z;
+        out.occlusion = sY.w;
+        return out;
+    }
+    gradient2d gX(dpdx.zy * scale, dpdy.zy * scale), gZ(dpdx.xy * scale, dpdy.xy * scale);
+    float2 uvX = p.zy * scale, uvZ = p.xy * scale;
+    float4 aX = albedoMap.sample(s, uvX, slice, gX), aZ = albedoMap.sample(s, uvZ, slice, gZ);
+    float4 sX = surfaceMap.sample(s, uvX, slice, gX), sZ = surfaceMap.sample(s, uvZ, slice, gZ);
+    float3 tX = float3((sX.xy * 2.0 - 1.0) * bend, 0), tZ = float3((sZ.xy * 2.0 - 1.0) * bend, 0);
+    // UDN: each projection's tangent normal swizzled into the world and added to the surface's.
+    float3 wX = float3(n.x, tX.y + n.y, tX.x + n.z);
+    float3 wY = float3(tY.x + n.x, n.y, tY.y + n.z);
+    float3 wZ = float3(tZ.x + n.x, tZ.y + n.y, n.z);
+    out.albedo = aX.rgb * blend.x + aY.rgb * blend.y + aZ.rgb * blend.z;
+    out.height = aX.a * blend.x + aY.a * blend.y + aZ.a * blend.z;
+    out.normal = normalize(wX * blend.x + wY * blend.y + wZ * blend.z);
+    float4 sAll = sX * blend.x + sY * blend.y + sZ * blend.z;
+    out.roughness = sAll.z;
+    out.occlusion = sAll.w;
+    return out;
+}
+
+/// **The ground's surface from its painted layers** (`texturedGround`): each layer's weight at the point, read between
+/// the four grid points round it from `weights` (eight bytes a point, `WorldGroundWeights`), then — Unity's and Unreal's
+/// height blend — sharpened by each layer's height map, so the higher of two layers shows through where they meet: pebbles
+/// poke out of the mud rather than fading into it. A layer with no texture is its colour, flat, at mid height.
+static LayerSample texturedGroundSurface(float3 p, float3 n, constant FrameUniforms &frame, constant GroundLayers &layers,
+                                         device const uchar4 *weights, texture2d_array<float> albedoMap,
+                                         texture2d_array<float> surfaceMap) {
+    constexpr sampler s(filter::linear, mip_filter::linear, address::repeat, max_anisotropy(16));
+    int side = int(frame.ground.z);
+    float2 g = clamp((p.xz + frame.ground.x) / frame.ground.y, 0.0, float(side - 1));
+    int2 c = min(int2(g), int2(side - 2));
+    float2 f = g - float2(c);
+    int i00 = c.y * side + c.x, i10 = i00 + 1, i01 = i00 + side, i11 = i01 + 1;
+    float4 lo = mix(mix(float4(weights[i00 * 2]), float4(weights[i10 * 2]), f.x),
+                    mix(float4(weights[i01 * 2]), float4(weights[i11 * 2]), f.x), f.y) / 255.0;
+    float4 hi = mix(mix(float4(weights[i00 * 2 + 1]), float4(weights[i10 * 2 + 1]), f.x),
+                    mix(float4(weights[i01 * 2 + 1]), float4(weights[i11 * 2 + 1]), f.x), f.y) / 255.0;
+    float w[8] = { lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w };
+    float3 dpdx = dfdx(p), dpdy = dfdy(p);
+    LayerSample got[8];
+    float key[8];
+    float top = -1;
+    for (int k = 0; k < 8; k++) {
+        key[k] = -1;
+        if (w[k] < 0.004) continue;
+        float slice = layers.colour[k].w;
+        if (slice >= 0) {
+            got[k] = sampleLayer(albedoMap, surfaceMap, s, uint(slice), layers.params[k].x, layers.params[k].y, p, n,
+                                 dpdx, dpdy);
+        } else {
+            got[k].albedo = layers.colour[k].rgb;
+            got[k].height = 0.5;
+            got[k].normal = n;
+            got[k].roughness = 0.9;
+            got[k].occlusion = 1;
+        }
+        // Height counts for as much as about a third of a layer's weight: enough to break up a soft edge, not to
+        // swallow a lightly painted layer.
+        key[k] = w[k] + (got[k].height - 0.5) * 0.35;
+        top = max(top, key[k]);
+    }
+    LayerSample out = { float3(0), 0, float3(0), 0, 0 };
+    float total = 0;
+    for (int k = 0; k < 8; k++) {
+        if (key[k] < 0) continue;
+        float b = max(key[k] - (top - 0.12), 0.0) * w[k];
+        out.albedo += got[k].albedo * b;
+        out.normal += got[k].normal * b;
+        out.roughness += got[k].roughness * b;
+        out.occlusion += got[k].occlusion * b;
+        out.height += got[k].height * b;
+        total += b;
+    }
+    if (total <= 0) {
+        out.albedo = layers.colour[0].rgb; out.normal = n; out.roughness = 0.9; out.occlusion = 1; out.height = 0.5;
+        return out;
+    }
+    out.albedo /= total;
+    out.normal = normalize(out.normal);
+    out.roughness /= total;
+    out.occlusion /= total;
+    out.height /= total;
+    // **Broad variation**, a few tens of metres across, so a field is not one tone however well its texture repeats.
+    float broad = duValueNoise(p.xz * 0.035) * 0.6 + duValueNoise(p.xz * 0.11 + 31.0) * 0.4;
+    out.albedo *= mix(0.86, 1.1, broad);
+    return out;
+}
+
 /// The season of a copy standing at `root` (`duSeasonOf`) — none where the seasons are compiled out.
 static inline void seasonOf(float2 root, float4 foliage, constant DUWeatherSurface &weather, thread float4 &colour,
                             thread float &leaves) {
@@ -551,7 +699,11 @@ fragment float4 propFragment(VertexOut in [[stage_in]],
                              device const float *puddles [[buffer(8)]],
                              device const float *litterField [[buffer(9)]],
                              texture2d<float> cloudMap [[texture(8)]],
-                             texture3d<float> fogVolume [[texture(9)]])
+                             texture3d<float> fogVolume [[texture(9)]],
+                             constant GroundLayers &groundLayers [[buffer(10)]],
+                             device const uchar4 *groundWeights [[buffer(11)]],
+                             texture2d_array<float> groundAlbedo [[texture(10)]],
+                             texture2d_array<float> groundSurface [[texture(11)]])
 {
     constexpr sampler linear(filter::linear, mip_filter::linear, address::repeat, max_anisotropy(8));
     float3 worldPosition = in.worldPosition, normal = in.normal, tint = in.tint;
@@ -567,11 +719,23 @@ fragment float4 propFragment(VertexOut in [[stage_in]],
     }
     float3 n = normalize(normal);
     float3 v = normalize(frame.cameraPosition.xyz - worldPosition);
-    // A pack's single-sided cards — leaves, grass — are lit from whichever side is seen. **Only where the normal
-    // faces away**: foliage packs bake a card's normals pointing up, for soft light across a clump, and flipping
-    // those on every back face lit half a meadow as if it faced the ground.
+    // A pack's single-sided cards — leaves, grass — are lit from whichever side is seen. **A back face's normal is
+    // mirrored across the card, never flipped by where the eye is**: foliage packs bake a card's normals pointing up,
+    // for soft light across a clump. Flipping every back face lit half a meadow as if it faced the ground; flipping
+    // only where the normal faced away from the eye turned a blade dark exactly where it rose above eye height — a
+    // hard line along the horizon through a meadow seen at eye height (2026-11-20). Mirrored, a true normal turns to
+    // the side seen, a baked upward one on an upright card stays as it is, and nothing changes with the view.
     float3 faceNormal = n;
-    if (!frontFacing && dot(n, v) < 0) n = -n;
+    if (!frontFacing) {
+        float3 card = cross(dfdx(worldPosition), dfdy(worldPosition));
+        if (length_squared(card) > 1e-12) {
+            card = normalize(card);
+            if (dot(card, v) > 0) card = -card;     // the card's front, which faces away from the eye on a back face
+            n = normalize(n - 2 * dot(n, card) * card);
+        } else if (dot(n, v) < 0) {
+            n = -n;
+        }
+    }
     // The sheet repeated as its material says (`_Albedo_Tiling`, carried with its grime).
     float2 uv = grunge.params.w > 0.5 ? in.uv * grunge.params.z : in.uv;
     float4 base = baseMap.sample(linear, uv);
@@ -587,6 +751,16 @@ fragment float4 propFragment(VertexOut in [[stage_in]],
         } else if (a < object.params.z) { discard_fragment(); }
     }
     float3 albedo = object.baseColour.rgb * base.rgb * tint;
+    float surfaceRoughness = object.params.x, occlusion = 1.0;
+    // **The ground from its layers' textures** (`texturedGround`), in place of its painted colours.
+    if (texturedGround && object.params.w > 0.5) {
+        LayerSample ground = texturedGroundSurface(worldPosition, faceNormal, frame, groundLayers, groundWeights,
+                                                   groundAlbedo, groundSurface);
+        albedo = ground.albedo;
+        n = ground.normal;
+        surfaceRoughness = ground.roughness;
+        occlusion = ground.occlusion;
+    }
     if (grunge.params.w > 0.5) albedo = grimed(albedo, worldPosition, faceNormal, grunge, grungeMap, linear);
     // **Through the year** (fall colors): a turning tree's leaves coloured or fallen, grass gone straw.
     if (seasonsOnFoliage && !duThroughTheYear(albedo, base.a, worldPosition, in.fallColour, in.fallLeaves, object.params.z > 0, object.emissive.w > 0.5)) discard_fragment();
@@ -609,13 +783,13 @@ fragment float4 propFragment(VertexOut in [[stage_in]],
              * duCloudShadow(worldPosition, l, frame.weather, cloudMap);
 
     // Wet is glossy: a soaked surface toward 0.15, a puddle toward a mirror.
-    float roughness = duWetRoughness(object.params.x, weathered);
+    float roughness = duWetRoughness(surfaceRoughness, weathered);
     float shininess = 2.0 / (roughness * roughness * roughness * roughness) - 2.0;
     float specular = pow(saturate(dot(n, h)), shininess) * (shininess + 8.0) / (8.0 * M_PI_F) * 0.04;
 
     // What glows: the material's emission times its map, white where it has none.
     // (The ground is never under itself: a coarse chunk's outline can sit a little below the full ground it is read from.)
-    float3 colour = albedo * (frame.sunColour.rgb * nl / M_PI_F + hemisphere(n, frame) * (coarseGround ? 1.0 : skyReaching(worldPosition, frame, groundVertices))
+    float3 colour = albedo * (frame.sunColour.rgb * nl / M_PI_F + hemisphere(n, frame) * occlusion * (coarseGround ? 1.0 : skyReaching(worldPosition, frame, groundVertices))
                             + pointLighting(worldPosition, n, frame))
                   + frame.sunColour.rgb * specular * nl
                   + object.emissive.rgb * glowMap.sample(linear, in.uv).rgb;
@@ -628,7 +802,7 @@ fragment float4 propFragment(VertexOut in [[stage_in]],
     // **A fine grain on the ground near the eye** (`fogParams.z`, the scene's `groundGrain`): two scales of value noise,
     // half a metre and two metres, darkening by up to a fifth, gone by forty metres — something underfoot to see go by
     // on ground painted one colour. See `WorldScene.groundGrain`.
-    if (object.params.w > 0.5 && frame.fogParams.z > 0) {
+    if (!texturedGround && object.params.w > 0.5 && frame.fogParams.z > 0) {
         float2 p = worldPosition.xz;
         float fine = duValueNoise(p * 2.0), coarse = duValueNoise(p * 0.5 + 17.0);
         float grain = (fine * 0.6 + coarse * 0.4) * frame.fogParams.z;
