@@ -107,6 +107,50 @@ struct WorldFileTests {
         #expect(bare.effectMeshes == [:] && bare.grime == [])
     }
 
+    @Test("A fire's light and a light's flicker come through, and a file without them has neither")
+    func effectLightsAndFlicker() throws {
+        var file = world()
+        let flame = ParticleRecipe(count: 1, speed: 1, spread: 0.1, lifetime: 0.6, size: 0.3, color: .one)
+        let glow = WorldFile.Light(position: [0, 0.6, 0], colour: [1, 0.5, 0.2], intensity: 2.2, reach: 9.5, flicker: 1)
+        file.effects = [WorldFile.Effect(kind: "fire", variety: 0, position: SIMD3(2, 0, 3), rate: 40, radius: 0.35,
+                                         direction: SIMD3(0, 1, 0), prewarm: 1, followsSun: false, recipe: flame, light: glow)]
+        file.lights = [WorldFile.Light(position: [5, 1, 5], colour: [1, 1, 1], intensity: 1, reach: 6)]
+        let data = try file.data()
+        let read = try WorldFile.read(data)
+        #expect(read == file && read.effects[0].light?.flicker == 1 && read.lights[0].flicker == nil)
+        #expect(!String(decoding: try world().data(), as: UTF8.self).contains("flicker"))
+        let text = String(decoding: data, as: UTF8.self)
+        let old = try WorldFile.read(Data(text.replacingOccurrences(of: #","flicker":1"#, with: "").utf8))
+        #expect(old.effects[0].light?.flicker == nil)
+        // Every light, for a game that lights by the file: the lamp, and the fire's glow at its fire.
+        #expect(read.allLights.count == 2 && read.allLights[1].position == [2, 0.6, 3])
+        #expect(read.allLights[0].flickering(at: 1.3) == read.allLights[0], "a steady light holds")
+        let flickered = read.allLights[1].flickering(at: 1.3)
+        #expect(flickered.intensity != 2.2 && abs(flickered.intensity - 2.2) < 2.2 * 0.23)
+        let viaScene = WorldScene.Light(position: SIMD3(2, 0.6, 3), colour: SIMD3(1, 0.5, 0.2), intensity: 2.2, reach: 9.5,
+                                        flicker: 1).flickering(at: 1.3)
+        #expect(flickered.intensity == viaScene.intensity, "flickering as the engine's renderer does")
+    }
+
+    @Test("A frame lights with an effect's light at its effect, and a fire's flickers while a lamp holds steady")
+    func framesLightFlickering() {
+        let flame = ParticleRecipe(count: 1, speed: 1, spread: 0.1, lifetime: 0.6, size: 0.3, color: .one)
+        let lamp = WorldScene.Light(position: SIMD3(9, 2, 9), colour: .one, intensity: 1, reach: 6)
+        let glow = WorldScene.Light(position: SIMD3(0, 0.6, 0), colour: SIMD3(1, 0.5, 0.2), intensity: 2, reach: 9, flicker: 1)
+        let scene = WorldScene(effects: [WorldScene.Effect(kind: "fire", position: SIMD3(2, 0, 3), rate: 40, radius: 0.35,
+                                                           recipe: flame, light: glow)], lights: [lamp])
+        let lit = scene.lights(at: 0)
+        #expect(lit.count == 2 && lit[0] == lamp)
+        #expect(simd_distance(lit[1].position, SIMD3(2, 0.6, 3)) < 0.06, "at its fire, stirring a few centimetres")
+        let strengths = stride(from: 0.0, to: 2, by: 0.05).map { scene.lights(at: $0)[1].intensity }
+        #expect(strengths.allSatisfy { $0 > 2 * 0.77 && $0 < 2 * 1.23 }, "wavering by about a fifth")
+        #expect((strengths.max()! - strengths.min()!) > 0.3, "and visibly")
+        #expect(scene.lights(at: 1.25) == scene.lights(at: 1.25), "the same at the same moment")
+        let beforeHour = scene.lights(at: 3600 - 1e-4)[1].intensity, afterHour = scene.lights(at: 3600)[1].intensity
+        #expect(abs(beforeHour - afterHour) < 0.01, "no jump where the clock wraps")
+        #expect(WorldScene.Light(position: .zero, colour: .one, intensity: 1, reach: 1, flicker: 5).flicker == 1)
+    }
+
     /// A look with every key, as an editor writes it.
     static let goopJSON = """
     {"baseOpacity":0.941,"deep":[0.07,0.17,0.013],"deepHeight":2.58,"foamOpacity":0.38,"foamTiling":2.5,

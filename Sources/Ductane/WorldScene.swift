@@ -219,11 +219,15 @@ public nonisolated struct WorldScene: Equatable, Sendable {
         /// **Whether it keeps to fine days** — butterflies: fewer in spring and autumn, none in winter or where snow lies,
         /// hidden in rain, snow, storms and dust, and at night (``living(in:sunElevation:yearPosition:)``).
         public var keepsToFineDays: Bool
+        /// **The light it gives off** — a fire's flickering glow — its ``Light/position`` from the effect's own, so one
+        /// placed fire lights what is round it as fire prefabs do; nil for the rest. A frame lights with it beside the
+        /// scene's lights (``WorldScene/lights(at:)``).
+        public var light: Light?
 
         public init(kind: String, variety: Int = 0, position: SIMD3<Float>, rate: Float, radius: Float,
                     direction: SIMD3<Float> = SIMD3(0, 1, 0), prewarm: Float = 0, followsSun: Bool = false,
                     recipe: ParticleRecipe, followers: [ParticleRecipe] = [], seed: Int = 0, blowsWithWind: Bool = false,
-                    turnedVariety: Int? = nil, keepsToFineDays: Bool = false) {
+                    turnedVariety: Int? = nil, keepsToFineDays: Bool = false, light: Light? = nil) {
             self.kind = kind
             self.variety = variety
             self.position = position
@@ -238,6 +242,7 @@ public nonisolated struct WorldScene: Equatable, Sendable {
             self.blowsWithWind = blowsWithWind
             self.turnedVariety = turnedVariety
             self.keepsToFineDays = keepsToFineDays
+            self.light = light
         }
 
         /// How thick an effect may be: the most a dense one throws.
@@ -309,6 +314,15 @@ public nonisolated struct WorldScene: Equatable, Sendable {
 
     // MARK: Lights
 
+    /// **What a frame lights with at `time`**: the scene's lights and the light each effect gives off (``Effect/light``),
+    /// placed at its effect, every one flickering as it is set to (``Light/flickering(at:)``).
+    func lights(at time: Double) -> [Light] {
+        let given = effects.compactMap { effect in
+            effect.light.map { var light = $0; light.position += effect.position; return light }
+        }
+        return (lights + given).map { $0.flickering(at: time) }
+    }
+
     /// **A point light**: where, its colour (linear) and strength, and how far it reaches — full close by, falling to
     /// nothing at its reach.
     public struct Light: Equatable, Sendable {
@@ -316,11 +330,30 @@ public nonisolated struct WorldScene: Equatable, Sendable {
         public var colour: SIMD3<Float>
         public var intensity: Float
         public var reach: Float
-        public init(position: SIMD3<Float>, colour: SIMD3<Float>, intensity: Float, reach: Float) {
+        /// **How much it flickers**, 0…1: 0 steady — a lamp — and 1 a fire's, its strength wavering by about a fifth and
+        /// its middle stirring a few centimetres (``flickering(at:)``).
+        public var flicker: Float
+        public init(position: SIMD3<Float>, colour: SIMD3<Float>, intensity: Float, reach: Float, flicker: Float = 0) {
             self.position = position
             self.colour = colour
             self.intensity = intensity
             self.reach = reach
+            self.flicker = flicker.isFinite ? min(max(flicker, 0), 1) : 0
+        }
+
+        /// **The light at `time`, flickering** — three waves of its own phase (from where it stands, so two fires never
+        /// beat together) at 1.7, 4.3 and 9.1 a second, each a whole number of times an hour so a clock wrapping at the
+        /// hour has no jump. A steady light as it is.
+        public func flickering(at time: Double) -> Light {
+            guard flicker > 0 else { return self }
+            let t = time.truncatingRemainder(dividingBy: 3600)
+            let phase = Double(position.x * 12.9898 + position.z * 78.233)
+            func wave(_ hertz: Double, _ offset: Double) -> Float { Float(sin(2 * .pi * hertz * t + phase * offset)) }
+            let strength = 0.55 * wave(1.7, 1) + 0.3 * wave(4.3, 1.7) + 0.15 * wave(9.1, 2.3)
+            var lit = self
+            lit.intensity = intensity * max(0, 1 + flicker * 0.22 * strength)
+            lit.position += SIMD3(wave(2.3, 3.1), wave(3.7, 0.7) * 0.5, wave(1.9, 4.3)) * (0.05 * flicker)
+            return lit
         }
 
         /// **The lights nearest a point**, at most `limit` — what a frame lights with: none lights every pixel in a zone. A
@@ -368,7 +401,8 @@ public nonisolated extension WorldScene {
                    rate: effect.rate, radius: effect.radius, direction: WorldScene.vector(effect.direction, or: SIMD3(0, 1, 0)),
                    prewarm: effect.prewarm, followsSun: effect.followsSun, recipe: effect.recipe,
                    followers: effect.followers, seed: index * 1_000, blowsWithWind: false,
-                   turnedVariety: effect.kind == "leaves" ? 1 : nil, keepsToFineDays: effect.kind == "butterflies")
+                   turnedVariety: effect.kind == "leaves" ? 1 : nil, keepsToFineDays: effect.kind == "butterflies",
+                   light: effect.light.map(WorldScene.light))
         }
         var meshes: [String: URL] = [:]
         for (name, prop) in world.effectMeshes where urls.indices.contains(prop) { meshes[name] = urls[prop] }
@@ -381,12 +415,15 @@ public nonisolated extension WorldScene {
         for (prop, kind) in world.found where urls.indices.contains(prop) { found[urls[prop]] = kind }
         self.init(placements: placements, scatters: scatters, sky: world.sky, weather: world.weather ?? .clear,
                   waters: world.waters, streams: world.streams, effects: effects,
-                  lights: world.lights.map {
-                      Light(position: WorldScene.vector($0.position), colour: WorldScene.vector($0.colour),
-                            intensity: $0.intensity, reach: $0.reach)
-                  },
+                  lights: world.lights.map(WorldScene.light),
                   boundary: world.boundary, foliage: foliage, sway: sway, groundCover: groundCover, guessesByName: false, effectMeshes: meshes,
                   found: found, markers: world.markers)
+    }
+
+    /// A light as the world file has it.
+    private static func light(_ light: WorldFile.Light) -> Light {
+        Light(position: vector(light.position), colour: vector(light.colour), intensity: light.intensity,
+              reach: light.reach, flicker: light.flicker ?? 0)
     }
 
     /// Three numbers as a vector, `fallback` if there are not three.

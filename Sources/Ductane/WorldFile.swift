@@ -177,6 +177,16 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
     /// The markers of `kind`, in any case, in the order they were placed.
     public func markers(_ kind: String) -> [Marker] { markers.filter { $0.is(kind) } }
 
+    /// **Every light the world lights with**: its ``lights`` and the light each effect gives off (``Effect/light``) — a
+    /// fire's glow — placed at its effect. Flicker each at a frame's time (``Light/flickering(at:)``) to light with it.
+    public var allLights: [Light] {
+        lights + effects.compactMap { effect in
+            guard var light = effect.light, light.position.count == 3, effect.position.count == 3 else { return nil }
+            light.position = zip(light.position, effect.position).map { $0 + $1 }
+            return light
+        }
+    }
+
     // MARK: Props and placements
 
     /// One placed prop — a placement, or one copy of a scattered group.
@@ -419,8 +429,11 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         public var recipe: ParticleRecipe
         /// What its particles are followed by: recipes its ``ParticleRecipe/then`` counts on, its own being 0.
         public var followers: [ParticleRecipe]
+        /// **The light it gives off** — a fire's glow — placed from the effect's own position; nil, none.
+        public var light: Light?
         public init(kind: String, variety: Int, position: SIMD3<Float>, rate: Float, radius: Float, direction: SIMD3<Float>,
-                    prewarm: Float, followsSun: Bool, recipe: ParticleRecipe, followers: [ParticleRecipe] = []) {
+                    prewarm: Float, followsSun: Bool, recipe: ParticleRecipe, followers: [ParticleRecipe] = [],
+                    light: Light? = nil) {
             self.kind = kind
             self.variety = variety
             self.position = [position.x, position.y, position.z]
@@ -431,6 +444,7 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
             self.followsSun = followsSun
             self.recipe = recipe
             self.followers = followers
+            self.light = light
         }
 
         public init(from decoder: Decoder) throws {
@@ -445,10 +459,11 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
             followsSun = try c.decodeIfPresent(Bool.self, forKey: .followsSun) ?? false
             recipe = try c.decode(ParticleRecipe.self, forKey: .recipe)
             followers = try c.decodeIfPresent([ParticleRecipe].self, forKey: .followers) ?? []
+            light = try c.decodeIfPresent(Light.self, forKey: .light)
         }
 
         private enum CodingKeys: String, CodingKey {
-            case kind, variety, position, rate, radius, direction, prewarm, followsSun, recipe, followers
+            case kind, variety, position, rate, radius, direction, prewarm, followsSun, recipe, followers, light
         }
     }
 
@@ -645,11 +660,27 @@ public nonisolated struct WorldFile: Codable, Equatable, Sendable {
         public var colour: [Float]
         public var intensity: Float
         public var reach: Float
-        public init(position: [Float], colour: [Float], intensity: Float, reach: Float) {
+        /// How much it flickers, 0 steady to 1 a fire's (``WorldScene/Light/flicker``); nil, steady.
+        public var flicker: Float?
+        public init(position: [Float], colour: [Float], intensity: Float, reach: Float, flicker: Float? = nil) {
             self.position = position
             self.colour = colour
             self.intensity = intensity
             self.reach = reach
+            self.flicker = flicker
+        }
+
+        /// **The light at `time`, flickering as it is set to** (``WorldScene/Light/flickering(at:)``) — for a game that
+        /// lights with the file's lights itself. A steady light as it is.
+        public func flickering(at time: Double) -> Light {
+            guard let flicker, flicker > 0, position.count == 3, colour.count == 3 else { return self }
+            let lit = WorldScene.Light(position: SIMD3(position[0], position[1], position[2]),
+                                       colour: SIMD3(colour[0], colour[1], colour[2]), intensity: intensity, reach: reach,
+                                       flicker: flicker).flickering(at: time)
+            var out = self
+            out.position = [lit.position.x, lit.position.y, lit.position.z]
+            out.intensity = lit.intensity
+            return out
         }
     }
 

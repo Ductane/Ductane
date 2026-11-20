@@ -123,6 +123,10 @@ public nonisolated struct ParticleRecipe: Sendable, Equatable, Codable {
     public var then: Int?
     /// How many of ``then`` it throws when it dies.
     public var thenCount: Int = 1
+    /// **How likely it is to throw ``then`` at all**, 0…1 — Unity's sub-emitter probability: a fire's flames each die,
+    /// and only now and then does one throw a spark. 1 always. Drawn from the particle's own birth, so it is the same
+    /// every run.
+    public var thenChance: Float = 1
     /// **How many times a line of ``then`` may go on**: a particle born of this many before it throws nothing more. What
     /// keeps a frog that leaps and sits from leaping for ever.
     public var generations: Int = 0
@@ -156,7 +160,7 @@ public nonisolated struct ParticleRecipe: Sendable, Equatable, Codable {
                 spawnsLevel: Bool = false, fadeIn: Float = 0, fadeOut: Float = 0, flapRate: Float = 0, sprite: Int? = nil,
                 aspect: Float = 1, alignment: Alignment = .camera, axis: SIMD3<Float> = SIMD3(0, 1, 0),
                 stretch: Float = 0, softness: Float = 0, lands: Bool = false, then: Int? = nil, thenCount: Int = 1,
-                generations: Int = 0, mesh: String? = nil, unlit: Bool = false, sizeOverLife: [SIMD2<Float>] = [],
+                thenChance: Float = 1, generations: Int = 0, mesh: String? = nil, unlit: Bool = false, sizeOverLife: [SIMD2<Float>] = [],
                 opacityOverLife: [SIMD2<Float>] = [], colourOverLife: [SIMD4<Float>] = []) {
         self.storedCount = max(0, count)
         self.speed = speed
@@ -187,6 +191,7 @@ public nonisolated struct ParticleRecipe: Sendable, Equatable, Codable {
         self.lands = lands
         self.then = then
         self.thenCount = max(thenCount, 0)
+        self.thenChance = thenChance.isFinite ? min(max(thenChance, 0), 1) : 1
         self.generations = max(generations, 0)
         self.mesh = mesh
         self.unlit = unlit
@@ -234,7 +239,7 @@ public nonisolated struct ParticleRecipe: Sendable, Equatable, Codable {
         case count, speed, spread, lifetime, size, growth, gravity, drag, color, opacity, fade, glows
         case wander, wanderRate, maxSpeed, spawnRadius, spawnsLevel, fadeIn, fadeOut, flapRate, sprite
         case aspect, alignment, axis, stretch
-        case softness, lands, then, thenCount, generations, mesh
+        case softness, lands, then, thenCount, thenChance, generations, mesh
         case unlit, sizeOverLife, opacityOverLife, colourOverLife
     }
 
@@ -256,7 +261,7 @@ public nonisolated struct ParticleRecipe: Sendable, Equatable, Codable {
                   aspect: value(.aspect, 1), alignment: value(.alignment, .camera), axis: value(.axis, SIMD3(0, 1, 0)),
                   stretch: value(.stretch, 0), softness: value(.softness, 0), lands: value(.lands, false),
                   then: (try? c.decodeIfPresent(Int.self, forKey: .then)) ?? nil, thenCount: value(.thenCount, 1),
-                  generations: value(.generations, 0), mesh: (try? c.decodeIfPresent(String.self, forKey: .mesh)) ?? nil,
+                  thenChance: value(.thenChance, 1), generations: value(.generations, 0), mesh: (try? c.decodeIfPresent(String.self, forKey: .mesh)) ?? nil,
                   unlit: value(.unlit, false), sizeOverLife: value(.sizeOverLife, []),
                   opacityOverLife: value(.opacityOverLife, []), colourOverLife: value(.colourOverLife, []))
     }
@@ -279,6 +284,7 @@ public nonisolated struct ParticleRecipe: Sendable, Equatable, Codable {
         if lands { try c.encode(lands, forKey: .lands) }
         if let then {
             try c.encode(then, forKey: .then); try c.encode(thenCount, forKey: .thenCount)
+            if thenChance < 1 { try c.encode(thenChance, forKey: .thenChance) }
             try c.encode(generations, forKey: .generations)
         }
         try c.encodeIfPresent(mesh, forKey: .mesh)
@@ -405,7 +411,8 @@ public nonisolated struct ParticleSystem: Sendable {
         func died(_ index: Int) {
             free.append(index)
             let p = particles[index], r = recipes[p.recipe]
-            if let then = r.then, p.generation < r.generations, r.thenCount > 0 {
+            if let then = r.then, p.generation < r.generations, r.thenCount > 0,
+               r.thenChance >= 1 || ParticleSystem.hash(p.birth &* 7 &+ 3, index) < r.thenChance {
                 following.append((then, p.position, r.thenCount, p.generation + 1, p.birth &* 31 &+ index))
             }
         }

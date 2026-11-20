@@ -318,6 +318,30 @@ struct ParticleFollowingTests {
         #expect(system.live.allSatisfy { $0.generation == 1 })
     }
 
+    @Test("What follows is thrown only as often as its chance says, the same every run, and a chance survives saving")
+    func thenChance() throws {
+        func sparks(chance: Float) -> Int {
+            let flame = ParticleRecipe(count: 400, speed: 0, spread: 0, lifetime: 0.2, size: 1, gravity: 0, drag: 0,
+                                       color: .one, then: 1, thenChance: chance, generations: 1)
+            let spark = ParticleRecipe(count: 1, speed: 0, spread: 0, lifetime: 5, size: 0.1, gravity: 0, drag: 0, color: .one)
+            var system = ParticleSystem(recipes: [flame, spark], capacity: 1024)
+            system.burst(0, at: .zero, seed: 7)
+            for _ in 0..<30 { system.step(deltaTime: step) }
+            return system.live.filter { $0.recipe == 1 }.count
+        }
+        let some = sparks(chance: 0.1)
+        #expect(some > 20 && some < 60, "about one in ten of 400: \(some)")
+        #expect(sparks(chance: 0.1) == some)
+        #expect(sparks(chance: 0) == 0 && sparks(chance: 1) == 400)
+        var rare = ParticleRecipe(count: 1, speed: 0, spread: 0, lifetime: 1, size: 1, color: .one, then: 0)
+        rare.thenChance = 0.25
+        #expect(try JSONDecoder().decode(ParticleRecipe.self, from: JSONEncoder().encode(rare)).thenChance == 0.25)
+        let always = String(decoding: try JSONEncoder().encode(ParticleRecipe(count: 1, speed: 0, spread: 0, lifetime: 1,
+                                                                            size: 1, color: .one, then: 0)), as: UTF8.self)
+        #expect(!always.contains("thenChance"), "a chance of 1 is left out, so files from before are written as they were")
+        #expect(ParticleRecipe(count: 1, speed: 0, spread: 0, lifetime: 1, size: 1, color: .one, thenChance: 3).thenChance == 1)
+    }
+
     @Test("Softness, landing, what follows and a mesh survive being saved; a file without them takes none")
     func saved() throws {
         let data = try JSONEncoder().encode(leap)

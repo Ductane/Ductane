@@ -3387,7 +3387,7 @@ public final class WorldRenderer: GameLoop {
         guard quality != .low, drawsEffects, let fog = volumetricFog else { return }
         refreshFogFloor()
         let weather = frameWeather
-        let lit = WorldScene.Light.nearest(scene.lights, to: camera.target, radius: max(camera.distance, 60), limit: Self.lightLimit)
+        let lit = WorldScene.Light.nearest(scene.lights(at: weatherTime), to: camera.target, radius: max(camera.distance, 60), limit: Self.lightLimit)
         let shadows = casting && shadowMap != nil
             ? VolumetricFog.Shadows(texture: shadowMap!.texture, viewProjections: matrices,
                                     splits: shadowMap!.cascades.splitVector, depthBias: shadowMap!.cascades.depthBiasVector)
@@ -4070,7 +4070,7 @@ public final class WorldRenderer: GameLoop {
         let slot = frameBuffer.contents().advanced(by: frameSlot * Self.frameStride)
         slot.copyMemory(from: &frame, byteCount: MemoryLayout<FrameUniforms>.stride)
         // The lights nearest the view — the orbit's target when looking down, the walker's eye when walking.
-        let lit = WorldScene.Light.nearest(scene.lights, to: camera.target, radius: max(camera.distance, 60), limit: Self.lightLimit)
+        let lit = WorldScene.Light.nearest(scene.lights(at: weatherTime), to: camera.target, radius: max(camera.distance, 60), limit: Self.lightLimit)
         let lights = slot.advanced(by: MemoryLayout<FrameUniforms>.stride).bindMemory(to: SIMD4<Float>.self,
                                                                                     capacity: 2 + Self.lightLimit * 2)
         lights[0] = SIMD4(Float(lit.count), 0, 0, 0)
