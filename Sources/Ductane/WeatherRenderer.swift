@@ -190,8 +190,9 @@ public final class WeatherRenderer {
         let (falling, splashes) = Self.counts(weather)
         guard falling > 0 else { return false }
         let s = weather.settings
-        // **Dust** (2026-11-16) is drawn as flakes are, but small, barely falling and carried hard on the wind, in the
-        // world's dust colour.
+        // **Dust** (2026-11-16) is barely falling and carried hard on the wind, in the world's dust colour — **drawn as
+        // streaks along the wind, as rain is along its fall** (2026-11-21): drawn as flakes, soft round discs lit brighter
+        // than the haze, a dust storm read as snow.
         let dust = s.precipitation <= 0 && s.dust > 0
         let flaky = s.snow || dust
         let box = flaky ? Self.snowBox : Self.rainBox
@@ -201,15 +202,15 @@ public final class WeatherRenderer {
         let wind = weather.wind * (dust ? 1.1 : s.snow ? 0.6 : 0.35)
         let sky = lighting.skyLight == .zero ? lighting.zenith : lighting.skyLight
         var light = (sky * (flaky ? 1.0 : 0.6) + lighting.colour * (flaky ? 0.4 : 0.1)) * max(brightness, 0)
-        if dust { light = weather.dustColour * (Weather.luminance(sky) + Weather.luminance(lighting.colour) * 0.3) * 1.6 }
+        if dust { light = weather.dustColour * (Weather.luminance(sky) + Weather.luminance(lighting.colour) * 0.3) * 0.9 }
         let wrapped = Float(time.isFinite ? time.truncatingRemainder(dividingBy: Self.wrap) : 0)
         var frame = Frame(
             viewProjection: viewProjection,
             coverViewProjection: cover?.viewProjection ?? matrix_identity_float4x4,
             eye: SIMD4(eye, wrapped),
             wind: SIMD4(wind, speed),
-            shape: SIMD4(halfWidth, box.height, Float(falling), dust ? 0.02 : s.snow ? 0.035 : 0.55),
-            light: SIMD4(light, dust ? 0.45 : s.snow ? 0.8 : 0.16),
+            shape: SIMD4(halfWidth, box.height, Float(falling), dust ? 0.7 : s.snow ? 0.035 : 0.55),
+            light: SIMD4(light, dust ? 0.22 : s.snow ? 0.8 : 0.16),
             cover: SIMD4(cover?.top ?? 0, WeatherCover.depthRange, cover == nil ? 0 : 1, Float(cover?.resolution ?? 1)),
             screen: SIMD4(pixelAngle, fogDensity, min(12, halfWidth * 0.7), s.snow ? 0 : s.precipitation),
             fog: SIMD4(lighting.horizon, 0))
@@ -222,7 +223,7 @@ public final class WeatherRenderer {
         encoder.setArgumentTable(argumentTable, stages: [.vertex, .fragment])
         argumentTable.setAddress(frameBuffer.gpuAddress + UInt64(offset), index: 0)
         argumentTable.setTexture((cover?.texture ?? blankCover).gpuResourceID, index: 0)
-        encoder.setRenderPipelineState(flaky ? snowPipeline : rainPipeline)
+        encoder.setRenderPipelineState(s.snow && !dust ? snowPipeline : rainPipeline)
         encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: falling)
         if splashes > 0, cover != nil {
             encoder.setRenderPipelineState(splashPipeline)

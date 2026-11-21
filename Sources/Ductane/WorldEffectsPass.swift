@@ -117,6 +117,8 @@ final class WorldEffectsPass {
         let (recipes, firsts) = Self.recipes(for: effects, lighting: lighting, meshes: meshes)
         builds += 1
         system = ParticleSystem(recipes: recipes, capacity: Self.capacity)
+        // Run beforehand in the wind they are in, so a storm's fire is blown from its first frame.
+        system.wind = wind
         emitters = effects.enumerated().map { index, effect in
             ParticleEmitter(recipe: firsts[index], rate: effect.rate, seedBase: effect.seed)
         }
@@ -144,8 +146,13 @@ final class WorldEffectsPass {
     /// How many times the system has been built and prewarmed — a test's way to see that a change followed in place.
     private(set) var builds = 0
 
+    /// **The wind the effects are in**: the frame's weather's (``Weather/wind``), carrying each effect's particles by its
+    /// recipe's ``ParticleRecipe/windResponse`` — a fire's flames lean, its smoke and sparks stream away downwind.
+    var wind: SIMD3<Float> = .zero
+
     func step(deltaTime: Float) {
         guard !emitters.isEmpty else { return }
+        system.wind = wind
         for index in emitters.indices {
             emitters[index].emit(into: &system, at: origins[index], direction: directions[index], deltaTime: deltaTime)
         }

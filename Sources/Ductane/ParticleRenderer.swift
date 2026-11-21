@@ -234,7 +234,8 @@ public final class ParticleRenderer {
                 atlas.map { $0.rect(column: sprite % $0.columns, row: sprite / $0.columns) }
             } ?? .zero
             let (right, up) = ParticleSystem.extent(of: particle, recipe: recipe, size: look.size,
-                                                    cameraRight: cameraRight, cameraUp: cameraUp)
+                                                    cameraRight: cameraRight, cameraUp: cameraUp,
+                                                    air: system.wind * recipe.windResponse)
             // Its softness rides in the position's w, which the shader has no other use for.
             instances[count] = Instance(position: SIMD4(particle.position, recipe.softness),
                                         colorAndCoverage: SIMD4(lit, look.coverage),

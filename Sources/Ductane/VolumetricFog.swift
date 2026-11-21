@@ -69,6 +69,12 @@ public final class VolumetricFog {
         public var clouds: CloudLayer?
         public var cloudMap: MTLTexture?
         public var lights: [Light]
+        /// **A dust storm's billows** (2026-11-21): their density at the ground per metre, how high they rise (a third as
+        /// thick every that many metres), their colour, and where the wind has rolled them (``Weather/dustBillows(at:)``).
+        public var dust: Float = 0
+        public var dustHeight: Float = 16
+        public var dustColour: SIMD3<Float> = Weather.desertDust
+        public var dustDrift: SIMD4<Float> = SIMD4(0, -1, 0, 0)
 
         public init(viewProjection: simd_float4x4, eye: SIMD3<Float>, lighting: DaySky.Lighting, fogDensity: Float,
                     fogStart: Float = 0, groundFog: Float = 0, groundFogHeight: Float = 6,
@@ -95,7 +101,7 @@ public final class VolumetricFog {
 
         /// Whether there is anything for the volume to draw: ground fog, the world's fog for the sun to throw shafts
         /// through, or lights to glow in the haze.
-        public var isEmpty: Bool { groundFog <= 0 && fogDensity <= 0 && lights.isEmpty }
+        public var isEmpty: Bool { groundFog <= 0 && fogDensity <= 0 && lights.isEmpty && dust <= 0 }
     }
 
     /// **What a shader needs to read the volume** — `duFogApply` in `DuctaneWeather.h` (``WeatherSurface/fogVolume``): x 1 when
@@ -133,6 +139,9 @@ public final class VolumetricFog {
         var lightColour: (SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>,
                           SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<Float>,
                           SIMD4<Float>, SIMD4<Float>)
+        var dust: SIMD4<Float> = .zero
+        var dustColour: SIMD4<Float> = .zero
+        var dustDrift: SIMD4<Float> = .zero
     }
     static let stride = (MemoryLayout<Uniforms>.stride + 255) & ~255
     public nonisolated static let maxLights = 16
@@ -149,6 +158,8 @@ public final class VolumetricFog {
     /// **The wisps' pattern repeats every this many metres** — 256 of their 18 m cells — so how far the wind has carried
     /// them wraps there with no seam (``Weather/wisps(at:)``).
     public nonisolated static let wispPeriod: Float = 18 * 256
+    /// **A dust storm's billows repeat every this many metres** — 256 of their 40 m cells.
+    public nonisolated static let dustPeriod: Float = 40 * 256
 
     private let device: MTLDevice
     private let pipeline: MTLComputePipelineState
@@ -309,6 +320,9 @@ public final class VolumetricFog {
             let p = raw.bindMemory(to: SIMD4<Float>.self)
             for (i, l) in frame.lights.prefix(Self.maxLights).enumerated() { p[i] = SIMD4(l.colour, 0) }
         }
+        values.dust = SIMD4(max(frame.dust, 0), max(frame.dustHeight, 1), 0, 0)
+        values.dustColour = SIMD4(frame.dustColour, 0)
+        values.dustDrift = frame.dustDrift
         let offset = slot * Self.stride
         uniforms.contents().advanced(by: offset).copyMemory(from: &values, byteCount: MemoryLayout<Uniforms>.size)
 

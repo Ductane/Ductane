@@ -364,7 +364,7 @@ static inline float duLeavesLeft(float2 root, float4 foliage) {
 }
 
 /// **A prop moved by the wind** (vertex stage; Ductane's `Sway`, `Weather.foliageWind`): `sway` is the prop's (x 1 a tree,
-/// 2 a plant, 3 cloth, 0 still; y its height, z half its width, metres in its own space), `wind` the frame's (x, z the way
+/// 2 a plant, 3 cloth, 4 cloth fastened to the rest — then y its hem's height and z its own — 0 still; y its height, z half its width, metres in its own space), `wind` the frame's (x, z the way
 /// it blows, y how hard, w seconds, wrapped hourly). A tree bends from its root, more toward the top, swaying a little even in still air, its leaf cards (`leafCard`)
 /// fluttering; a plant bends harder, all of it, in waves across a field; cloth ripples and billows, the more the further it
 /// hangs from its pole or wall. Each copy gusts at its own moment, from where it stands.
@@ -393,6 +393,14 @@ static inline float3 duSwayed(float3 world, float3 root, float scale, float4 swa
         float k = pow(h, 1.5) * height;
         float wave = sin(t * 1604.0 + dot(world.xz, float2(0.6, 0.4)) * 1.3 + phase);
         offset = along * k * (0.04 + 0.35 * strength * gust + (0.06 + 0.25 * strength) * wave);
+    } else if (kind > 3.5) {
+        // **Cloth fastened to the rest of the prop** (2026-11-21) — a wagon's canvas: held at its hem (`sway.y` above the
+        // root), billowing and rippling more the higher it rises over its `sway.z` metres.
+        float u = saturate((world.y - root.y - sway.y * scale) / max(sway.z * scale, 0.1));
+        float hold = sin(u * M_PI_F * 0.5);
+        float ripple = sin(t * 2865.0 + dot(world, float3(1.7, 2.3, 1.1)) * 3.0) * (0.008 + 0.06 * strength * gust);
+        float billow = 0.004 + 0.1 * strength * gust;
+        offset = (along * (billow + ripple) + float3(0, ripple * 0.5, 0)) * hold;
     } else {
         float out_ = saturate(length(world.xz - root.xz) / max(sway.z * scale, 0.2));
         float ripple = sin(t * 2865.0 + dot(world, float3(1.7, 2.3, 1.1)) * 2.0) * (0.02 + 0.1 * strength * gust);

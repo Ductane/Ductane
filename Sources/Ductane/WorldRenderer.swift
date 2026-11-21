@@ -85,10 +85,18 @@ public final class WorldRenderer: GameLoop {
         didSet {
             // Fall colors: what each prop does through the year, and where fallen leaves lie, follow what it changes.
             if oldValue.foliage != scene.foliage || oldValue.guessesByName != scene.guessesByName { foliageKinds = [:] }
-            if oldValue.sway != scene.sway || oldValue.guessesByName != scene.guessesByName {
+            if oldValue.sway != scene.sway || oldValue.guessesByName != scene.guessesByName
+                || oldValue.materialSway != scene.materialSway {
                 swayKinds = [:]
+                materialSwayKinds = [:]
+                forgetTurning()
                 rebakeFarPicturesForSway()
+                // What rolls is drawn apart from what stands, so both are gathered again.
+                placedCopies = nil
+                scatteredCopies = nil
+                rollingStale = true
             }
+            if oldValue.placements != scene.placements || oldValue.scatters != scene.scatters { rollingStale = true }
             if oldValue.foliage != scene.foliage || oldValue.placements != scene.placements
                 || oldValue.scatters != scene.scatters { litterStale = true }
             // **A placement dragged changes that placement's copy only**, as a scattered copy's does below.
@@ -251,6 +259,15 @@ public final class WorldRenderer: GameLoop {
             length = submesh.indexBuffer.length
             count = submesh.indexCount
             type = submesh.indexType
+            vertices = nil
+        }
+
+        /// Indices of its own, into the mesh's own vertices — part of a submesh (``TurningPart``).
+        init(buffer: MTLBuffer, count: Int) {
+            address = buffer.gpuAddress
+            length = count * 4
+            self.count = count
+            type = .uint32
             vertices = nil
         }
 
@@ -1351,6 +1368,7 @@ public final class WorldRenderer: GameLoop {
             textures.forget(file: url)
         }
         retire(dropped + Self.forgotten(texturesBefore, now: textures.allocations))
+        forgetTurning(urls)
     }
 
     /// Everything a prop's meshes hold on the GPU but textures, which the store shares between props.
@@ -1937,6 +1955,14 @@ public final class WorldRenderer: GameLoop {
         onStep?(deltaTime)
         streamTime += deltaTime
         weatherTime += Double(deltaTime)
+        // What rolls goes as far as the wind drives it, the way it blows.
+        let blowing = SIMD2(frameWeather.wind.x, frameWeather.wind.z)
+        if simd_length(blowing) > 0.1 { rollHeading = simd_normalize(blowing) }
+        rollSpeed = Self.rollSpeed(windSpeed: frameWeather.settings.windSpeed)
+        rollDistance += rollSpeed * deltaTime
+        // Turning parts go round as fast as the wind drives them.
+        turnAngle = (turnAngle + TurningPart.speed(windSpeed: frameWeather.settings.windSpeed) * deltaTime)
+            .truncatingRemainder(dividingBy: 2 * .pi)
         // The weather wipes footprints as it goes: slowly when calm, fast in falling snow or rain.
         if !footprints.prints.isEmpty { footprints.advance(seconds: Double(deltaTime), weather: frameWeather) }
         // Wind effects blow the weather's way (``WorldScene/Effect/blown(by:)``), falling leaves follow the season
@@ -1950,6 +1976,7 @@ public final class WorldRenderer: GameLoop {
             let blown = effect.blown(by: weather).living(in: weather, sunElevation: elevation, yearPosition: year)
             return fall.map { blown.inSeason($0.fall, phase: $0.phase) } ?? blown
         }
+        effects.wind = weather.wind
         effects.sync(shown, lighting: frameWeather.lighting(frameDaySky.lighting),
                      meshes: Set(scene.effectMeshes.filter { props[$0.value] != nil }.keys))
         guard drawsEffects else { return }
@@ -2213,23 +2240,193 @@ public final class WorldRenderer: GameLoop {
     /// How each prop file moves in the wind, as last asked — cleared when the scene's choices change.
     private var swayKinds: [URL: Sway] = [:]
 
+    /// How a prop file moves in the wind, as the scene says.
+    private func swayKind(of prop: URL) -> Sway {
+        if let known = swayKinds[prop] { return known }
+        let kind = scene.sway(of: prop)
+        swayKinds[prop] = kind
+        return kind
+    }
+
+    // MARK: Turning parts
+
+    /// **A prop's turning part, ready to draw** (``TurningPart``): per mesh and submesh, the triangles that stay and those
+    /// that turn, each with indices of its own into the mesh's vertices — nil where there are none.
+    final class TurningDraw {
+        let part: TurningPart
+        let still: [[IndexRange?]]
+        let turning: [[IndexRange?]]
+        let buffers: [MTLBuffer]
+        init(part: TurningPart, still: [[IndexRange?]], turning: [[IndexRange?]], buffers: [MTLBuffer]) {
+            self.part = part
+            self.still = still
+            self.turning = turning
+            self.buffers = buffers
+        }
+    }
+    /// Per prop file set to turn: what turns, or nil when nothing in it was found to (asked once, until the scene's wind
+    /// choices change or the prop is read again).
+    private var turningDraws: [URL: TurningDraw?] = [:]
+    /// **How far every turning part has gone round**, radians — stepped by the wind's speed each frame, never worked out
+    /// from a clock, so a wind that changes speeds them up or slows them rather than throwing them round at once.
+    private var turnAngle: Float = 0
+
+    /// **A prop's turning part, if it is set to turn and one is found** — read from its meshes the first time it is asked
+    /// for, in the prop's own space.
+    private func turningDraw(for url: URL, prop: PropMeshes) -> TurningDraw? {
+        guard swayKind(of: url) == .turns else { return nil }
+        if let known = turningDraws[url] { return known }
+        var meshes: [(positions: [SIMD3<Float>], submeshes: [[UInt32]])] = []
+        for shown in prop.meshes {
+            let mesh = shown.loaded.mesh
+            guard let vertexBuffer = mesh.vertexBuffers.first, vertexBuffer.buffer.storageMode != .private else {
+                turningDraws[url] = .some(nil)
+                return nil
+            }
+            let base = vertexBuffer.buffer.contents() + vertexBuffer.offset
+            let node = shown.loaded.nodeTransform
+            let positions = (0..<mesh.vertexCount).map { i -> SIMD3<Float> in
+                let p = base.advanced(by: i * 32).loadUnaligned(as: SIMD3<Float>.self)
+                let q = node * SIMD4(p, 1)
+                return SIMD3(q.x, q.y, q.z)
+            }
+            var submeshes: [[UInt32]] = []
+            for submesh in mesh.submeshes {
+                let indices = submesh.indexBuffer
+                guard indices.buffer.storageMode != .private else { turningDraws[url] = .some(nil); return nil }
+                let start = indices.buffer.contents() + indices.offset
+                submeshes.append(submesh.indexType == .uint32
+                    ? (0..<submesh.indexCount).map { start.advanced(by: $0 * 4).loadUnaligned(as: UInt32.self) }
+                    : (0..<submesh.indexCount).map { UInt32(start.advanced(by: $0 * 2).loadUnaligned(as: UInt16.self)) })
+            }
+            meshes.append((positions, submeshes))
+        }
+        guard let part = TurningPart.find(meshes: meshes) else {
+            NSLog("WorldRenderer: nothing found to turn in \(url.lastPathComponent)")
+            turningDraws[url] = .some(nil)
+            return nil
+        }
+        let total = meshes.reduce(0) { $0 + $1.submeshes.reduce(0) { $0 + $1.count / 3 } }
+        NSLog("WorldRenderer: %@ turns %d of its %d triangles about (%.2f, %.2f, %.2f), axis (%.2f, %.2f, %.2f)",
+              url.lastPathComponent, part.count, total, part.hub.x, part.hub.y, part.hub.z, part.axis.x, part.axis.y, part.axis.z)
+        var still: [[IndexRange?]] = [], turning: [[IndexRange?]] = [], buffers: [MTLBuffer] = []
+        func range(_ indices: [UInt32]) -> IndexRange? {
+            guard !indices.isEmpty,
+                  let buffer = engine.device.makeBuffer(bytes: indices, length: indices.count * 4, options: .storageModeShared)
+            else { return nil }
+            buffer.label = "Turning Part"
+            buffers.append(buffer)
+            return IndexRange(buffer: buffer, count: indices.count)
+        }
+        for (m, mesh) in meshes.enumerated() {
+            var meshStill: [IndexRange?] = [], meshTurning: [IndexRange?] = []
+            for (s, indices) in mesh.submeshes.enumerated() {
+                let flags = part.turns[m][s]
+                if !flags.contains(true) {
+                    meshStill.append(IndexRange(prop.meshes[m].loaded.mesh.submeshes[s]))
+                    meshTurning.append(nil)
+                    continue
+                }
+                var stays: [UInt32] = [], goes: [UInt32] = []
+                for (t, turns) in flags.enumerated() {
+                    if turns { goes += indices[(t * 3)..<(t * 3 + 3)] } else { stays += indices[(t * 3)..<(t * 3 + 3)] }
+                }
+                meshStill.append(range(stays))
+                meshTurning.append(range(goes))
+            }
+            still.append(meshStill)
+            turning.append(meshTurning)
+        }
+        if !buffers.isEmpty {
+            engine.residencySet.addAllocations(buffers)
+            engine.commitResidency()
+        }
+        let draw = TurningDraw(part: part, still: still, turning: turning, buffers: buffers)
+        turningDraws[url] = draw
+        return draw
+    }
+
+    /// Forgets what turns in these props, or in all — retiring what it held on the GPU.
+    private func forgetTurning(_ urls: Set<URL>? = nil) {
+        var dropped: [any MTLAllocation] = []
+        for (url, draw) in turningDraws where urls?.contains(url) ?? true {
+            if let draw { dropped += draw.buffers }
+        }
+        if let urls { for url in urls { turningDraws[url] = nil } } else { turningDraws = [:] }
+        retire(dropped)
+    }
+
     /// **How a prop moves in the wind, for its uniforms**: x 1 a tree, 2 a plant, 3 cloth, 0 still; y its height and z half
     /// its width, in its own space — what `swayed` bends it by.
     private func swayVector(for prop: URL, bounds: BoundingBox) -> SIMD4<Float> {
-        let kind: Sway
-        if let known = swayKinds[prop] { kind = known } else {
-            kind = scene.sway(of: prop)
-            swayKinds[prop] = kind
-        }
+        let kind = swayKind(of: prop)
         let code: Float = switch kind {
         case .tree: 1
         case .plant: 2
         case .cloth: 3
-        case .still: 0
+        // Turning is a part going round its hub (``TurningPart``), rolling a whole copy going over (``rolling``) — not bends.
+        case .still, .turns, .rolls: 0
         }
         guard code > 0 else { return .zero }
         let size = bounds.maximum - bounds.minimum
         return SIMD4(code, max(bounds.maximum.y, 0.1), max(size.x, size.z) / 2, 0)
+    }
+
+    /// How one material of a prop file moves when not as its prop, as last asked — cleared when the scene's choices change.
+    private var materialSwayKinds: [MaterialSwayKey: Sway?] = [:]
+    private struct MaterialSwayKey: Hashable { let prop: URL; let material: String }
+    /// Each submesh's height in its prop — bottom and top — for cloth fastened to the rest (``swayVector(for:bounds:shown:submesh:)``).
+    private var submeshSpans: [SubmeshKey: ClosedRange<Float>?] = [:]
+    private struct SubmeshKey: Hashable { let mesh: ObjectIdentifier; let submesh: Int }
+
+    /// **How one submesh moves in the wind**: as its prop (``swayVector(for:bounds:)``) unless its material is set apart —
+    /// cloth fastened to the rest of the prop (4: y its hem's height, z its own), or still — by its own material's name,
+    /// whatever it wears.
+    private func swayVector(for prop: URL, bounds: BoundingBox, shown: ShownMesh, submesh: Int) -> SIMD4<Float> {
+        let base = swayVector(for: prop, bounds: bounds)
+        let name = Self.materialName(shown.loaded.material(forSubmesh: submesh))
+        let key = MaterialSwayKey(prop: prop, material: name)
+        let part: Sway?
+        if let known = materialSwayKinds[key] { part = known } else {
+            part = scene.sway(of: prop, material: name)
+            materialSwayKinds[key] = .some(part)
+        }
+        guard let part else { return base }
+        switch part {
+        case .cloth:
+            guard let span = submeshSpan(shown, submesh) else { return base }
+            return SIMD4(4, span.lowerBound, max(span.upperBound - span.lowerBound, 0.05), 0)
+        case .tree, .plant:
+            let size = bounds.maximum - bounds.minimum
+            return SIMD4(part == .tree ? 1 : 2, max(bounds.maximum.y, 0.1), max(size.x, size.z) / 2, 0)
+        case .still, .turns, .rolls:
+            return .zero
+        }
+    }
+
+    /// A submesh's lowest and highest point in its prop's space, read once from its vertices.
+    private func submeshSpan(_ shown: ShownMesh, _ submesh: Int) -> ClosedRange<Float>? {
+        let key = SubmeshKey(mesh: ObjectIdentifier(shown.loaded.mesh), submesh: submesh)
+        if let known = submeshSpans[key] { return known }
+        var span: ClosedRange<Float>?
+        let mesh = shown.loaded.mesh
+        if let vertices = mesh.vertexBuffers.first, vertices.buffer.storageMode != .private,
+           mesh.submeshes.indices.contains(submesh), mesh.submeshes[submesh].indexBuffer.buffer.storageMode != .private {
+            let base = vertices.buffer.contents() + vertices.offset
+            let part = mesh.submeshes[submesh]
+            let start = part.indexBuffer.buffer.contents() + part.indexBuffer.offset
+            var low = Float.greatestFiniteMagnitude, high = -Float.greatestFiniteMagnitude
+            for i in 0..<part.indexCount {
+                let index = part.indexType == .uint32 ? Int(start.advanced(by: i * 4).loadUnaligned(as: UInt32.self))
+                    : Int(start.advanced(by: i * 2).loadUnaligned(as: UInt16.self))
+                let p = base.advanced(by: index * 32).loadUnaligned(as: SIMD3<Float>.self)
+                let y = (shown.loaded.nodeTransform * SIMD4(p, 1)).y
+                low = min(low, y); high = max(high, y)
+            }
+            if low <= high { span = low...high }
+        }
+        submeshSpans[key] = .some(span)
+        return span
     }
 
     /// **Whether every turning tree is bare** — the middle of winter with bare trees, allowing for the earliest and latest:
@@ -3291,10 +3488,17 @@ public final class WorldRenderer: GameLoop {
         }
         let copies = prepare(scattered, settings: scatteredSettings, view: scatterTransforms, shadows: shadowTransforms,
                              hidden: hidesScattered.map { hides in Set(scattered.index.compactMap { hides($0.key) ? $0.value : nil }) } ?? [])
+        // What rolls in the wind, where it has rolled to this frame.
+        let rolled = rolledCopies().map {
+            prepare($0, settings: settings, view: rollingTransforms, shadows: rollingShadowTransforms, hidden: [])
+        }
         sortSeeThrough()
         // The shadows, per cascade: solid submeshes and cut-out ones apart.
-        let shadowCopies = zip(placed.solid, copies.solid).map { $0 + $1 }
-        let cutCopies = zip(placed.cut, copies.cut).map { $0 + $1 }
+        func joined(_ a: [[ShadowPart]], _ b: [[ShadowPart]], _ c: [[ShadowPart]]?) -> [[ShadowPart]] {
+            a.indices.map { a[$0] + (b.indices.contains($0) ? b[$0] : []) + ((c?.indices.contains($0) ?? false) ? c![$0] : []) }
+        }
+        let shadowCopies = joined(placed.solid, copies.solid, rolled?.solid)
+        let cutCopies = joined(placed.cut, copies.cut, rolled?.cut)
 
         if redrawCover {
             encodeCover(into: commandBuffer, frameSlot: frameSlot, index: coverIndex, solid: shadowCopies, cut: cutCopies)
@@ -3415,7 +3619,7 @@ public final class WorldRenderer: GameLoop {
             ? VolumetricFog.Shadows(texture: shadowMap!.texture, viewProjections: matrices,
                                     splits: shadowMap!.cascades.splitVector, depthBias: shadowMap!.cascades.depthBiasVector)
             : nil
-        let frame = VolumetricFog.Frame(
+        var frame = VolumetricFog.Frame(
             viewProjection: viewProjection, eye: camera.eye, lighting: light,
             fogDensity: weather.fogDensity(over: scene.sky.fogDensity), fogStart: camera.distance,
             groundFog: weather.groundFogDensity(hour: frameDaySky.timeOfDay), groundFogHeight: weather.groundFog.height,
@@ -3423,6 +3627,10 @@ public final class WorldRenderer: GameLoop {
             wisps: weather.wisps(at: weatherTime), shadows: shadows,
             clouds: frameClouds?.layer, cloudMap: cloudPass?.coverageMap,
             lights: lit.map { VolumetricFog.Light(position: $0.position, reach: $0.reach, colour: $0.colour * $0.intensity) })
+        frame.dust = weather.settings.dust * Weather.dustCloudDensity
+        frame.dustHeight = Weather.dustCloudHeight
+        frame.dustColour = weather.dustColour
+        frame.dustDrift = weather.dustBillows(at: weatherTime)
         let size = engine.sceneSize
         guard let made = fog.encode(into: commandBuffer, frameSlot: frameSlot, frame: frame, quality: quality,
                                     width: max(size.width, 1), height: max(size.height, 1)) else { return }
@@ -3500,21 +3708,39 @@ public final class WorldRenderer: GameLoop {
                     preparedImpostors.append(ImpostorDraw(impostor: impostor, uniforms: address, instances: instances))
                     continue
                 }
-                let (shownMeshes, tier) = gathered.props[batch.key.prop].meshes(at: batch.key.level)
+                // **A prop with a turning part is drawn whole at full detail** (a windmill is one of a few): what stays,
+                // and what turns, turned.
+                let turning = turningDraw(for: gathered.urls[batch.key.prop], prop: gathered.props[batch.key.prop])
+                let (shownMeshes, tier) = turning == nil ? gathered.props[batch.key.prop].meshes(at: batch.key.level)
+                    : (gathered.props[batch.key.prop].meshes, 0)
+                let turn = turning?.part.transform(angle: turnAngle)
                 var seeThrough = false
                 let bare = Self.isBare(foliage)
-                for shown in shownMeshes {
+                for (m, shown) in shownMeshes.enumerated() {
                     for submesh in shown.loaded.mesh.submeshes.indices {
                         // See-through submeshes are drawn copy by copy, in order (``sortSeeThrough()``).
                         if shown.seeThrough[submesh] { seeThrough = true; continue }
                         if bare, Self.isLeafMaterial(shown.material(submesh).name) { continue }
-                        guard let address = instancedUniforms(for: shown, submesh: submesh, foliage: foliage, sway: sway)
-                        else { break }
-                        var draw = PreparedDraw(mesh: shown.loaded.mesh, indices: shown.indices(submesh: submesh, level: tier),
-                                                uniforms: address, baseMap: shown.baseMaps[submesh],
-                                                glowMap: shown.glowMaps[submesh], instances: instances)
-                        draw.grime = shown.grime(submesh)
-                        prepared.append(draw)
+                        let stays = turning.map { $0.still[m][submesh] } ?? shown.indices(submesh: submesh, level: tier)
+                        let sway = swayVector(for: gathered.urls[batch.key.prop], bounds: gathered.props[batch.key.prop].bounds,
+                                              shown: shown, submesh: submesh)
+                        if let stays {
+                            guard let address = instancedUniforms(for: shown, submesh: submesh, foliage: foliage, sway: sway)
+                            else { break }
+                            var draw = PreparedDraw(mesh: shown.loaded.mesh, indices: stays,
+                                                    uniforms: address, baseMap: shown.baseMaps[submesh],
+                                                    glowMap: shown.glowMaps[submesh], instances: instances)
+                            draw.grime = shown.grime(submesh)
+                            prepared.append(draw)
+                        }
+                        if let goes = turning?.turning[m][submesh],
+                           let address = instancedUniforms(for: shown, submesh: submesh, foliage: foliage, sway: sway, turn: turn) {
+                            var draw = PreparedDraw(mesh: shown.loaded.mesh, indices: goes, uniforms: address,
+                                                    baseMap: shown.baseMaps[submesh], glowMap: shown.glowMaps[submesh],
+                                                    instances: instances)
+                            draw.grime = shown.grime(submesh)
+                            prepared.append(draw)
+                        }
                     }
                 }
                 // **Snow built up on it** while snow lies, on the copies near enough to be drawn in full — not on grass,
@@ -3547,21 +3773,32 @@ public final class WorldRenderer: GameLoop {
             if let buffer = shadows[cascade].write(casting, frameSlot: frameSlot) {
                 for batch in casting.batches where !hidden.contains(batch.key.prop) {
                     let copies = (address: buffer.gpuAddress + UInt64(batch.byteOffset), count: batch.count)
-                    let (shownMeshes, tier) = gathered.props[batch.key.prop].meshes(at: batch.key.level)
+                    let turning = turningDraw(for: gathered.urls[batch.key.prop], prop: gathered.props[batch.key.prop])
+                    let (shownMeshes, tier) = turning == nil ? gathered.props[batch.key.prop].meshes(at: batch.key.level)
+                        : (gathered.props[batch.key.prop].meshes, 0)
+                    let turn = turning?.part.transform(angle: turnAngle)
                     let foliage = foliageVector(for: gathered.urls[batch.key.prop])
                     let sway = swayVector(for: gathered.urls[batch.key.prop], bounds: gathered.props[batch.key.prop].bounds)
                     // A tree that is thinning casts only the leaves it has: its solid canopy is cut by the mask too.
                     let thinning = Self.isThinning(foliage), bare = Self.isBare(foliage)
-                    for shown in shownMeshes {
+                    for (m, shown) in shownMeshes.enumerated() {
                         // Glass casts no shadow: light passes through it; a bare tree's leaves are not there.
                         for submesh in shown.loaded.mesh.submeshes.indices where !shown.seeThrough[submesh] {
                             if bare, Self.isLeafMaterial(shown.material(submesh).name) { continue }
-                            guard let address = instancedUniforms(for: shown, submesh: submesh, foliage: foliage,
-                                                                  sway: sway) else { break }
-                            let part = ShadowPart(mesh: shown.loaded.mesh,
-                                                  indices: shown.indices(submesh: submesh, level: tier),
-                                                  uniforms: address, baseMap: shown.baseMaps[submesh], copies: copies)
-                            if shown.cutoffs[submesh] > 0 || thinning { cut.append(part) } else { solid.append(part) }
+                            let sway = swayVector(for: gathered.urls[batch.key.prop],
+                                                  bounds: gathered.props[batch.key.prop].bounds, shown: shown, submesh: submesh)
+                            var pieces: [(IndexRange, simd_float4x4?)] = []
+                            if let stays = turning.map({ $0.still[m][submesh] }) ?? shown.indices(submesh: submesh, level: tier) {
+                                pieces.append((stays, nil))
+                            }
+                            if let goes = turning?.turning[m][submesh] { pieces.append((goes, turn)) }
+                            for (indices, turned) in pieces {
+                                guard let address = instancedUniforms(for: shown, submesh: submesh, foliage: foliage,
+                                                                      sway: sway, turn: turned) else { break }
+                                let part = ShadowPart(mesh: shown.loaded.mesh, indices: indices,
+                                                      uniforms: address, baseMap: shown.baseMaps[submesh], copies: copies)
+                                if shown.cutoffs[submesh] > 0 || thinning { cut.append(part) } else { solid.append(part) }
+                            }
                         }
                     }
                 }
@@ -3665,6 +3902,8 @@ public final class WorldRenderer: GameLoop {
         var gathered = ScatteredCopies()
         var slots = [Int](repeating: -1, count: scene.placements.count)
         for (i, placement) in scene.placements.enumerated() {
+            // What rolls in the wind is drawn apart, where it has rolled to (``rolling``).
+            if swayKind(of: placement.prop) == .rolls { continue }
             guard let prop = placedIndex(of: placement, in: &gathered) else { continue }
             slots[i] = gathered.copies.count
             gathered.copies.append(Self.copy(placement, of: prop, bounds: gathered.props[prop].bounds))
@@ -3672,6 +3911,7 @@ public final class WorldRenderer: GameLoop {
         gathered.slots = [slots]
         gathered.layOut()
         placedCopies = gathered
+        placedGeneration += 1
         return gathered
     }
 
@@ -3790,7 +4030,7 @@ public final class WorldRenderer: GameLoop {
             gathered.copies[slot] = Self.copy(now, of: prop, bounds: gathered.props[prop].bounds)
             changed = true
         }
-        if changed { gathered.layOut() }
+        if changed { gathered.layOut(); placedGeneration += 1 }
         placedCopies = gathered
         return true
     }
@@ -3831,15 +4071,17 @@ public final class WorldRenderer: GameLoop {
     /// One set of uniforms per scattered prop's mesh and submesh, per frame — shared by the view and every
     /// cascade, written the first time it is asked for.
     private func instancedUniforms(for shown: ShownMesh, submesh: Int, foliage: SIMD4<Float> = .zero,
-                                   sway: SIMD4<Float> = .zero) -> UInt64? {
+                                   sway: SIMD4<Float> = .zero, turn: simd_float4x4? = nil) -> UInt64? {
         let key = InstancedKey(mesh: ObjectIdentifier(shown.loaded.mesh), submesh: submesh, look: shown.look, foliage: foliage.x,
-                               sway: sway.x)
+                               sway: sway.x, turns: turn != nil)
         if let address = instancedUniformCache[key] { return address }
         let material = shown.material(submesh)
         // The mesh's own place in its prop; each copy's transform goes on top in the shader.
         // emissive.w: 1 for a submesh that is a tree's leaves alone, which shrink away rather than drop pixel by pixel.
         let leaf: Float = (foliage.x == 1 || sway.x == 1) && Self.isLeafMaterial(material.name) ? 1 : 0
-        let address = write(ObjectUniforms(model: shown.loaded.nodeTransform, normalMatrix: matrix_identity_float4x4,
+        // A turning part goes round its hub in the prop's space, after its node has put it there.
+        let address = write(ObjectUniforms(model: (turn ?? matrix_identity_float4x4) * shown.loaded.nodeTransform,
+                                           normalMatrix: matrix_identity_float4x4,
                                            baseColour: material.baseColor, emissive: SIMD4(material.emissive * 4, leaf),
                                            params: SIMD4(material.roughness, material.metallic, shown.cutoffs[submesh], 0),
                                            foliage: foliage, sway: sway, wind: frameWind))
@@ -3853,7 +4095,7 @@ public final class WorldRenderer: GameLoop {
     static let smallestCaster: Float = 80
 
     private struct InstancedKey: Hashable {
-        let mesh: ObjectIdentifier; let submesh: Int; let look: Int; let foliage: Float; let sway: Float
+        let mesh: ObjectIdentifier; let submesh: Int; let look: Int; let foliage: Float; let sway: Float; let turns: Bool
     }
     /// Scattered copies are batched by prop and level of detail.
     private nonisolated struct CopyKey: Hashable, Sendable { let prop: Int; let level: Int }
@@ -3997,6 +4239,142 @@ public final class WorldRenderer: GameLoop {
         return .init(transform: transform, minimum: box.minimum, maximum: box.maximum, scale: copy.scale, prop: prop)
     }
 
+    // MARK: Rolling in the wind
+
+    /// **The copies of props that roll in the wind** (``Sway/rolls`` — a tumbleweed), gathered apart from what stands, with
+    /// each one's transform as placed; again whenever the scene's copies or choices change, or props arrive.
+    private var rolling: (copies: ScatteredCopies, bases: [simd_float4x4])?
+    private var rollingStale = true
+    private var rollingLoadedCount = -1
+    /// How far everything that rolls has gone, metres — stepped by the wind's speed, never worked out from a clock.
+    private var rollDistance: Float = 0
+    /// The way the wind last blew, flat; and how fast what rolls is going now.
+    private var rollHeading = SIMD2<Float>(0, -1)
+    private var rollSpeed: Float = 0
+    /// Counts gatherings of the placed copies, so what rolling copies snag on is found again when they change.
+    private var placedGeneration = 0
+    /// Per rolling copy, where along its way it meets something solid — found for one heading and one set of placed copies.
+    private var rollingSnags: (heading: SIMD2<Float>, generation: Int, count: Int, intervals: [[(enter: Float, exit: Float)]])?
+    private lazy var rollingTransforms = InstanceBuffer(renderer: engine)
+    private lazy var rollingShadowTransforms = (0...Self.cascades(reaching: 0).count).map { _ in InstanceBuffer(renderer: engine) }
+
+    /// **How fast a tumbleweed rolls in a wind**, metres a second: still below a fresh breeze, about 6 m/s in a 20 m/s gale.
+    nonisolated static func rollSpeed(windSpeed: Float) -> Float { max(windSpeed - 5, 0) * 0.4 }
+    /// **How far one rolls before coming round again upwind of where it was placed**, shrinking away over its last metres
+    /// and growing back at the start — so a field of them keeps rolling past a place for as long as the wind blows.
+    nonisolated static let rollLoop: Float = 90
+
+    private func gatherRollingCopies() -> (copies: ScatteredCopies, bases: [simd_float4x4]) {
+        var gathered = ScatteredCopies()
+        for placement in scene.placements where swayKind(of: placement.prop) == .rolls {
+            guard let prop = placedIndex(of: placement, in: &gathered) else { continue }
+            gathered.copies.append(Self.copy(placement, of: prop, bounds: gathered.props[prop].bounds))
+        }
+        for scatter in scene.scatters {
+            let rolls = scatter.prototypes.map { swayKind(of: $0) == .rolls }
+            guard rolls.contains(true) else { continue }
+            let prototypes = scatter.prototypes.enumerated().map { k, url in
+                rolls[k] ? scatteredIndex(of: url, wearing: scatter.look(of: k), in: &gathered) : nil
+            }
+            for copy in scatter.copies where copy.prototype < prototypes.count && rolls[copy.prototype] {
+                guard let prop = prototypes[copy.prototype] else { continue }
+                gathered.copies.append(Self.copy(copy, of: prop, bounds: gathered.props[prop].bounds))
+            }
+        }
+        gathered.layOut()
+        return (gathered, gathered.copies.map(\.transform))
+    }
+
+    /// **Every rolling copy where the wind has taken it this frame**, or nil when nothing rolls. Each rolls its own pace
+    /// and hops its own length, from where it stands, spinning as it goes over the ground; it stops against anything solid
+    /// placed in its way — rocking there — and settles where it is when the wind drops.
+    private func rolledCopies() -> ScatteredCopies? {
+        if rolling == nil || rollingStale || rollingLoadedCount != props.count {
+            rolling = gatherRollingCopies()
+            rollingStale = false
+            rollingLoadedCount = props.count
+            rollingSnags = nil
+        }
+        guard var (gathered, bases) = rolling, !bases.isEmpty else { return nil }
+        let heading = rollHeading, loop = Self.rollLoop
+        let way = SIMD3(heading.x, 0, heading.y)
+        let axis = simd_normalize(simd_cross(SIMD3<Float>(0, 1, 0), way))
+        // What each copy meets on its way: placed things a hand's height or more, for this heading.
+        let generation = placedGeneration
+        if rollingSnags == nil || rollingSnags!.generation != generation || rollingSnags!.count != bases.count
+            || simd_dot(rollingSnags!.heading, heading) < 0.9986 {
+            let solids = (placedCopies?.copies ?? []).filter { $0.maximum.y - $0.minimum.y >= 0.4 }
+            let intervals: [[(enter: Float, exit: Float)]] = gathered.copies.indices.map { i in
+                let box = gathered.props[gathered.copies[i].prop].bounds
+                let base = bases[i]
+                let centre = base * SIMD4(box.center, 1)
+                let r = simd_reduce_max(box.size) / 2 * WorldScene.largestScale(of: base) * 0.8
+                let home = SIMD2(centre.x, centre.z)
+                return solids.compactMap { solid -> (enter: Float, exit: Float)? in
+                    // The way through the solid's footprint, grown by the rolling copy's size: slabs in x and z.
+                    var enter = -Float.greatestFiniteMagnitude, exit = Float.greatestFiniteMagnitude
+                    for k in 0..<2 {
+                        let lo = (k == 0 ? solid.minimum.x : solid.minimum.z) - r, hi = (k == 0 ? solid.maximum.x : solid.maximum.z) + r
+                        let o = k == 0 ? home.x : home.y, d = k == 0 ? heading.x : heading.y
+                        if abs(d) < 1e-5 {
+                            if o < lo || o > hi { return nil }
+                        } else {
+                            let a = (lo - o) / d, b = (hi - o) / d
+                            enter = max(enter, min(a, b)); exit = min(exit, max(a, b))
+                        }
+                    }
+                    return enter < exit ? (enter, exit) : nil
+                }.sorted { $0.enter < $1.enter }
+            }
+            rollingSnags = (heading, generation, bases.count, intervals)
+        }
+        let snags = rollingSnags!.intervals
+        let going = rollSpeed
+        for i in gathered.copies.indices {
+            let base = bases[i]
+            let box = gathered.props[gathered.copies[i].prop].bounds
+            let centre4 = base * SIMD4(box.center, 1)
+            let centre0 = SIMD3(centre4.x, centre4.y, centre4.z)
+            let r = max(simd_reduce_max(box.size) / 2 * WorldScene.largestScale(of: base), 0.05)
+            // Its own pace, start and hop, from where it was put.
+            var h = UInt32(bitPattern: Int32(truncatingIfNeeded: Int(centre0.x * 97))) &* 2654435761
+                ^ UInt32(bitPattern: Int32(truncatingIfNeeded: Int(centre0.z * 89))) &* 2246822519
+            func next() -> Float { h ^= h >> 15; h = h &* 0x2C1B3C6D; h ^= h >> 12; return Float(h & 0xFFFF) / 65535 }
+            let pace = 0.75 + 0.5 * next(), phase = 0.15 + 0.7 * next(), hop = 1.6 + 1.6 * next(), wobble = next() * 6.28
+            let s = rollDistance * pace + phase * loop
+            let lap = (s / loop).rounded(.down)
+            let along = s - lap * loop
+            var travel = along - phase * loop
+            // Stopped by the first thing it meets since this lap began — at its home on the first, upwind after.
+            let start: Float = lap < 1 ? 0 : -phase * loop
+            var pinned = false
+            if let first = snags[i].first(where: { $0.exit > start && $0.enter >= start - 0.01 }), travel > first.enter {
+                travel = first.enter
+                pinned = true
+            }
+            let fade = rollDistance > 0 ? Self.smooth(0, 3, along) * Self.smooth(loop, loop - 3, along) : 1
+            let place = SIMD2(centre0.x, centre0.z) + heading * travel
+            let groundAtHome = groundHeight(x: centre0.x, z: centre0.z, holes: false) ?? (centre0.y - r)
+            let ground = groundHeight(x: place.x, z: place.y, holes: false) ?? groundAtHome
+            let bounce = pinned ? 0 : r * 0.5 * abs(sin(.pi * travel / hop)) * min(going / 3, 1)
+            let centre = SIMD3(place.x, ground + (centre0.y - groundAtHome) + bounce, place.y)
+            var angle = travel / r
+            if pinned { angle += sin(rollDistance * 2.5 + wobble) * 0.12 * min(going / 3, 1) }
+            let transform = simd_float4x4(translation: centre) * simd_float4x4(simd_quatf(angle: angle, axis: axis))
+                * simd_float4x4(diagonal: SIMD4(fade, fade, fade, 1)) * simd_float4x4(translation: -centre0) * base
+            let moved = box.transformed(by: transform)
+            gathered.copies[i] = WorldCopyField.Copy(transform: transform, minimum: moved.minimum, maximum: moved.maximum,
+                                                     scale: gathered.copies[i].scale * fade, prop: gathered.copies[i].prop)
+        }
+        gathered.layOut()
+        return gathered
+    }
+
+    private static func smooth(_ a: Float, _ b: Float, _ x: Float) -> Float {
+        let t = min(max((x - a) / (b - a), 0), 1)
+        return t * t * (3 - 2 * t)
+    }
+
     private func gatherScatteredCopies() -> ScatteredCopies {
         arrivedForScattered = []
         litterStale = true
@@ -4006,7 +4384,9 @@ public final class WorldRenderer: GameLoop {
                 scatteredIndex(of: url, wearing: scatter.look(of: k), in: &gathered)
             }
             var slots = [Int](repeating: -1, count: scatter.copies.count)
+            let rolls = scatter.prototypes.map { swayKind(of: $0) == .rolls }
             for (i, copy) in scatter.copies.enumerated() where copy.prototype < prototypes.count {
+                if rolls[copy.prototype] { continue }
                 guard let prop = prototypes[copy.prototype] else { continue }
                 slots[i] = gathered.copies.count
                 gathered.copies.append(Self.copy(copy, of: prop, bounds: gathered.props[prop].bounds))

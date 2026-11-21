@@ -196,6 +196,22 @@ public nonisolated extension Weather {
     /// to it, so turning the world's heading turns them rather than throwing them elsewhere. Never the wind of the moment
     /// times the clock: a wind that changed moved the whole distance since the clock began at once, and the wisps jumped
     /// about through every change of a schedule.
+    /// **A dust storm's billows**, how thick at the ground per metre at full strength (2026-11-21).
+    static let dustCloudDensity: Float = 0.035
+    /// How high they rise: a third as thick every this many metres up.
+    static let dustCloudHeight: Float = 16
+    /// How fast they roll past, metres a second — steady, as the wisps are, whatever the wind does this moment.
+    static let dustBillowSpeed: Double = 9
+
+    /// **Where a dust storm's billows have rolled to by `time`**, as ``wisps(at:)`` but at a gale's pace, within
+    /// ``VolumetricFog/dustPeriod`` — what ``VolumetricFog/Frame/dustDrift`` takes.
+    func dustBillows(at time: Double) -> SIMD4<Float> {
+        let heading = Double(prevailingHeading) * .pi / 180
+        let travelled = (time.isFinite ? time : 0) * Self.dustBillowSpeed
+        let period = Double(VolumetricFog.dustPeriod)
+        return SIMD4(Float(sin(heading)), Float(-cos(heading)), Float(travelled - (travelled / period).rounded(.down) * period), 0)
+    }
+
     func wisps(at time: Double) -> SIMD4<Float> {
         let heading = Double(prevailingHeading) * .pi / 180
         let travelled = (time.isFinite ? time : 0) * Self.wispSpeed

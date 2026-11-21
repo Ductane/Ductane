@@ -149,6 +149,11 @@ public nonisolated struct ParticleRecipe: Sendable, Equatable, Codable {
     /// **Its colour over its life** — the colour of Unity's Color over Lifetime: `(t, r, g, b)` keys multiplying
     /// ``color``, linear. Empty, it keeps its colour.
     public var colourOverLife: [SIMD4<Float>] = []
+    /// **How much the wind carries it**, 0…1 (2026-11-21): the share of the air's velocity (``ParticleSystem/wind``) it
+    /// is pulled toward through its ``drag``, as Unity's wind zones push a particle system. 0 — a sunbeam, a bubble on
+    /// the goop — is not moved; smoke and leaves go with the air; a flame leans and a spark streams off. Its own
+    /// ``maxSpeed`` is then a limit on how fast it moves *through* the air, so a leaf can still be blown at a gale's pace.
+    public var windResponse: Float = 0
 
     private var storedCount: Int
     private var storedLifetime: Float
@@ -161,7 +166,7 @@ public nonisolated struct ParticleRecipe: Sendable, Equatable, Codable {
                 aspect: Float = 1, alignment: Alignment = .camera, axis: SIMD3<Float> = SIMD3(0, 1, 0),
                 stretch: Float = 0, softness: Float = 0, lands: Bool = false, then: Int? = nil, thenCount: Int = 1,
                 thenChance: Float = 1, generations: Int = 0, mesh: String? = nil, unlit: Bool = false, sizeOverLife: [SIMD2<Float>] = [],
-                opacityOverLife: [SIMD2<Float>] = [], colourOverLife: [SIMD4<Float>] = []) {
+                opacityOverLife: [SIMD2<Float>] = [], colourOverLife: [SIMD4<Float>] = [], windResponse: Float = 0) {
         self.storedCount = max(0, count)
         self.speed = speed
         self.spread = spread
@@ -198,6 +203,7 @@ public nonisolated struct ParticleRecipe: Sendable, Equatable, Codable {
         self.sizeOverLife = sizeOverLife.sorted { $0.x < $1.x }
         self.opacityOverLife = opacityOverLife.sorted { $0.x < $1.x }
         self.colourOverLife = colourOverLife.sorted { $0.x < $1.x }
+        self.windResponse = windResponse.isFinite ? min(max(windResponse, 0), 1) : 0
     }
 
     /// A curve's value at `t`: its keys joined in straight lines, held past the first and the last.
@@ -240,7 +246,7 @@ public nonisolated struct ParticleRecipe: Sendable, Equatable, Codable {
         case wander, wanderRate, maxSpeed, spawnRadius, spawnsLevel, fadeIn, fadeOut, flapRate, sprite
         case aspect, alignment, axis, stretch
         case softness, lands, then, thenCount, thenChance, generations, mesh
-        case unlit, sizeOverLife, opacityOverLife, colourOverLife
+        case unlit, sizeOverLife, opacityOverLife, colourOverLife, windResponse
     }
 
     /// **Saved as JSON, every field but a color optional** — a pack describes an effect in a file, and a file from
@@ -263,7 +269,8 @@ public nonisolated struct ParticleRecipe: Sendable, Equatable, Codable {
                   then: (try? c.decodeIfPresent(Int.self, forKey: .then)) ?? nil, thenCount: value(.thenCount, 1),
                   thenChance: value(.thenChance, 1), generations: value(.generations, 0), mesh: (try? c.decodeIfPresent(String.self, forKey: .mesh)) ?? nil,
                   unlit: value(.unlit, false), sizeOverLife: value(.sizeOverLife, []),
-                  opacityOverLife: value(.opacityOverLife, []), colourOverLife: value(.colourOverLife, []))
+                  opacityOverLife: value(.opacityOverLife, []), colourOverLife: value(.colourOverLife, []),
+                  windResponse: value(.windResponse, 0))
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -288,6 +295,7 @@ public nonisolated struct ParticleRecipe: Sendable, Equatable, Codable {
             try c.encode(generations, forKey: .generations)
         }
         try c.encodeIfPresent(mesh, forKey: .mesh)
+        if windResponse > 0 { try c.encode(windResponse, forKey: .windResponse) }
         if unlit { try c.encode(unlit, forKey: .unlit) }
         if !sizeOverLife.isEmpty { try c.encode(sizeOverLife, forKey: .sizeOverLife) }
         if !opacityOverLife.isEmpty { try c.encode(opacityOverLife, forKey: .opacityOverLife) }
@@ -374,6 +382,10 @@ public nonisolated struct ParticleSystem: Sendable {
     /// How many can be alive at once.
     public let capacity: Int
 
+    /// **The air's velocity**, metres a second (2026-11-21): the weather's wind where the particles are. Each is carried
+    /// by its recipe's share of it (``ParticleRecipe/windResponse``). Still air by default.
+    public var wind: SIMD3<Float> = .zero
+
     public private(set) var particles: [Particle] = []
     private var births = 0
     /// **Slots whose particle has died**, for the next to be born in. Without them every birth was appended while the pool
@@ -424,9 +436,13 @@ public nonisolated struct ParticleSystem: Sendable {
             if recipe.wander > 0 {
                 particles[index].velocity += ParticleSystem.wander(of: particles[index], recipe) * deltaTime
             }
-            particles[index].velocity *= max(0, 1 - recipe.drag * deltaTime)
-            let speed = simd_length(particles[index].velocity)
-            if speed > recipe.maxSpeed { particles[index].velocity *= recipe.maxSpeed / speed }
+            // Drag pulls it toward the air it is in — still air, or its share of the wind — and its top speed is through
+            // that air.
+            let air = wind * recipe.windResponse
+            var through = (particles[index].velocity - air) * max(0, 1 - recipe.drag * deltaTime)
+            let speed = simd_length(through)
+            if speed > recipe.maxSpeed { through *= recipe.maxSpeed / speed }
+            particles[index].velocity = air + through
             particles[index].position += particles[index].velocity * deltaTime
             // **Landing**: coming down through the height it was born at, it stops there, and its life is over.
             if recipe.lands, particles[index].velocity.y < 0, particles[index].position.y <= particles[index].ground {
@@ -550,19 +566,25 @@ public nonisolated struct ParticleSystem: Sendable {
         -> (right: SIMD3<Float>, up: SIMD3<Float>) {
         let r = recipes[particle.recipe]
         return Self.extent(of: particle, recipe: r, size: Self.appearance(of: particle, recipe: r).size,
-                           cameraRight: cameraRight, cameraUp: cameraUp)
+                           cameraRight: cameraRight, cameraUp: cameraUp, air: wind * r.windResponse)
     }
 
     /// The same, for a recipe in hand and a size already worked out (``appearance(of:recipe:)``).
+    ///
+    /// `air` is the wind it is carried by (``wind`` × its ``ParticleRecipe/windResponse``): **a tall camera-facing
+    /// particle leans into it** (2026-11-21) — a flame stands up in still air and bends downwind in a gale, as if it
+    /// rose at 2.5 m/s through air moving sideways.
     static func extent(of particle: Particle, recipe r: ParticleRecipe, size: Float, cameraRight: SIMD3<Float>,
-                       cameraUp: SIMD3<Float>) -> (right: SIMD3<Float>, up: SIMD3<Float>) {
+                       cameraUp: SIMD3<Float>, air: SIMD3<Float> = .zero) -> (right: SIMD3<Float>, up: SIMD3<Float>) {
         let half = size * 0.5
         let width = half * width(of: particle, recipe: r)
         var height = half * r.aspect
         var along: SIMD3<Float>
         switch r.alignment {
         case .camera:
-            return (cameraRight * width, cameraUp * height)
+            let flat = SIMD3(air.x, 0, air.z)
+            guard r.aspect > 1, simd_length_squared(flat) > 0.0025 else { return (cameraRight * width, cameraUp * height) }
+            along = simd_normalize(SIMD3(0, 2.5, 0) + flat)
         case .velocity:
             let speed = simd_length(particle.velocity)
             guard speed > 1e-4 else { return (cameraRight * width, cameraUp * height) }

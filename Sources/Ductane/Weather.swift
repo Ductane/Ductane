@@ -206,7 +206,9 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
         case .fog:
             Settings(cloudCover: mix(0.4, 0.8), windSpeed: mix(0, 1.5), fogDensity: mix(0.006, 0.025))
         case .dust:
-            Settings(cloudCover: mix(0.1, 0.35), windSpeed: mix(8, 22), fogDensity: mix(0.004, 0.024), dust: mix(0.3, 1))
+            // The even haze is thinner than the dust once was alone (0.004–0.024): the billows rolling through it
+            // (``dustCloudDensity``) carry most of a storm, thick where they pass and clearer between (2026-11-21).
+            Settings(cloudCover: mix(0.1, 0.35), windSpeed: mix(8, 22), fogDensity: mix(0.003, 0.014), dust: mix(0.3, 1))
         }
     }
 

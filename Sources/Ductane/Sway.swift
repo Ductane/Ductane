@@ -20,11 +20,25 @@ public nonisolated enum Sway: String, Sendable, Codable, CaseIterable {
     case plant
     /// Ripples and billows: flags, banners, tarps, awnings, hanging hides.
     case cloth
+    /// **Turns about its hub** (2026-11-21): a windmill's sails, a wind pump's wheel, a fan, a water wheel — the part of it
+    /// that turns found in its geometry (``TurningPart``), faster the harder the wind blows.
+    case turns
+    /// **Rolls across the ground in a strong wind** (2026-11-21): a tumbleweed — bouncing and spinning downwind, snagging on
+    /// what stands in its way, settling where it is when the wind drops.
+    case rolls
     /// Does not move.
     case still
 
     /// Whether it moves at all.
     public var moves: Bool { self != .still }
+
+    /// **Whether a material is cloth by its name** — canvas, a tarp, a sail, a flag: the cover of a wagon or a stall, which
+    /// billows where it is fastened to the rest of the prop (``WorldScene/sway(of:material:)``).
+    public static func isCloth(material name: String) -> Bool {
+        !Set(Foliage.words(name)).isDisjoint(with: ["canvas", "cloth", "cloths", "fabric", "tarp", "tarps", "tarpaulin", "sail",
+                                                    "sails", "flag", "flags", "banner", "banners", "awning", "curtain", "drape",
+                                                    "tent", "cover", "linen", "burlap", "hide", "pelt"])
+    }
 
     /// **The guess from a prop's name** — its words (``Foliage/words(_:)``). Cloth words first, then a tree (dead and bare
     /// ones too: their branches move), then plants; anything else still. A log, stump or trunk lying down is still.
@@ -35,6 +49,13 @@ public nonisolated enum Sway: String, Sendable, Codable, CaseIterable {
                                     "rags", "laundry", "washing", "pennant", "pennants", "bunting", "hide", "hides", "pelt",
                                     "pelts", "canvas", "sheet", "sheets", "windsock", "streamer", "streamers"]) {
             return .cloth
+        }
+        if !words.isDisjoint(with: ["tumbleweed", "tumbleweeds"]) { return .rolls }
+        // Stiff rosettes sway as a tree does — gently, from the root — never bending as grass does.
+        if !words.isDisjoint(with: ["yucca", "yuccas", "agave", "agaves", "aloe", "aloes"]) { return .tree }
+        if !words.isDisjoint(with: ["windmill", "windmills", "windpump", "windpumps", "turbine", "turbines", "waterwheel",
+                                    "waterwheels", "propeller", "propellers", "pinwheel", "pinwheels"]) {
+            return .turns
         }
         if !words.isDisjoint(with: ["stump", "stumps", "log", "logs", "trunk", "trunks", "fallen", "driftwood"]) { return .still }
         if !words.isDisjoint(with: ["tree", "trees", "pine", "pines", "fir", "spruce", "cedar", "palm", "palms", "oak",

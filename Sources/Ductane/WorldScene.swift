@@ -116,6 +116,10 @@ public nonisolated struct WorldScene: Equatable, Sendable {
     public var foliage: [URL: Foliage]
     /// **How each prop moves in the wind**, by file.
     public var sway: [URL: Sway]
+    /// **How a part of a prop moves in the wind**, by file and material name (2026-11-21): a wagon's canvas cover billowing
+    /// while the wagon stands still. A material not here follows its prop — or, guessing by name, is cloth if its name
+    /// says so (``Sway/isCloth(material:)``).
+    public var materialSway: [URL: [String: Sway]] = [:]
     /// **Ground cover a person decided**, by file: true or false whatever the prop's shape. The rest are judged by shape
     /// (``isGroundCover(_:size:cutOut:)``).
     public var groundCover: [URL: Bool]
@@ -172,6 +176,14 @@ public nonisolated struct WorldScene: Equatable, Sendable {
     /// **How a prop moves in the wind**: as set, else guessed from its name (``guessesByName``), else still.
     public func sway(of prop: URL) -> Sway {
         sway[prop] ?? (guessesByName ? Sway.guess(name: prop.deletingPathExtension().lastPathComponent) : .still)
+    }
+
+    /// **How one material of a prop moves in the wind**, when it is not as its prop: as set (``materialSway``), else cloth
+    /// by its name when guessing. Nil follows the prop. Cloth set on a part is fastened where it meets the rest — it
+    /// billows from its hem — where a prop that is all cloth hangs from its pole.
+    public func sway(of prop: URL, material: String) -> Sway? {
+        if let set = materialSway[prop]?[material] { return set }
+        return guessesByName && Sway.isCloth(material: material) && sway(of: prop) != .cloth ? .cloth : nil
     }
 
     /// **Whether a prop is ground cover**, which a player's ``GraphicsSettings/plantDensity`` thins: as a person set it
@@ -409,6 +421,8 @@ public nonisolated extension WorldScene {
         var foliage: [URL: Foliage] = [:], sway: [URL: Sway] = [:]
         for (prop, kind) in world.foliage where urls.indices.contains(prop) { foliage[urls[prop]] = kind }
         for (prop, kind) in world.sway where urls.indices.contains(prop) { sway[urls[prop]] = kind }
+        var materialSway: [URL: [String: Sway]] = [:]
+        for (prop, parts) in world.materialSway where urls.indices.contains(prop) { materialSway[urls[prop]] = parts }
         var groundCover: [URL: Bool] = [:]
         for (prop, set) in world.groundCover where urls.indices.contains(prop) { groundCover[urls[prop]] = set }
         var found: [URL: String] = [:]
@@ -418,6 +432,7 @@ public nonisolated extension WorldScene {
                   lights: world.lights.map(WorldScene.light),
                   boundary: world.boundary, foliage: foliage, sway: sway, groundCover: groundCover, guessesByName: false, effectMeshes: meshes,
                   found: found, markers: world.markers)
+        self.materialSway = materialSway
     }
 
     /// A light as the world file has it.

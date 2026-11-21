@@ -36,6 +36,9 @@ struct DUFogUniforms {
     float4   lightCount;     // x
     float4   lightPosition[16];  // xyz; w reach
     float4   lightColour[16];    // rgb
+    float4   dust;           // x a dust storm's billows' density at the ground, per metre; y how high they rise
+    float4   dustColour;     // rgb
+    float4   dustDrift;      // Weather.dustBillows(at:): xy the way they roll, z how far
 };
 
 /// **Where a point of the world is on the clouds' pattern** — `CloudLayer.place(_:)`: in a frame turned to the way they
@@ -94,6 +97,36 @@ static float duGroundFogDepth(float3 a, float3 b, constant DUFogUniforms &u, tex
     return u.groundFog.x * (1 + water * u.groundColour.w) * along * wisps * inside;
 }
 
+/// **How much of a dust storm's billows a stretch of the eye's ray passes through** (2026-11-21): thickest at the ground,
+/// a third as thick every `dust.y` metres up, worked out along the stretch as ground fog is — and broken into billows
+/// 40 m across rolling past on the wind, tumbling as they rise, with thinner air between.
+static float duDustDepth(float3 a, float3 b, constant DUFogUniforms &u, texture2d<float> floorMap) {
+    if (u.dust.x <= 0) return 0;
+    constexpr sampler edge(filter::linear, address::clamp_to_edge);
+    float3 mid = (a + b) * 0.5;
+    float floorHeight = u.groundFog.z, inside = 1;
+    if (u.groundFog.w > 0.5) {
+        float2 uv = (mid.xz - u.floorPlace.xy) / u.floorPlace.z;
+        floorHeight += floorMap.sample(edge, uv, level(0)).r;
+        float2 beyond = max(max(-uv, uv - 1), 0.0) * u.floorPlace.z;
+        inside = 1 - smoothstep(0.0, 20.0, max(beyond.x, beyond.y));
+    }
+    float span = distance(a, b), h = u.dust.y;
+    float lo = min(a.y, b.y) - floorHeight, hi = max(a.y, b.y) - floorHeight;
+    float along;
+    if (hi - lo < 1e-3) {
+        along = span * exp(-max(lo, 0.0) / h);
+    } else {
+        float below = clamp(-lo, 0.0, hi - lo);
+        float above = h * (exp(-max(lo, 0.0) / h) - exp(-max(hi, 0.0) / h));
+        along = span / (hi - lo) * (below + above);
+    }
+    float rise = max(mid.y - floorHeight, 0.0) / h;
+    float2 q = duCloudPlace(mid.xz, u.dustDrift) / 40.0;
+    float n = duFogNoise(q + float2(rise * 0.7, 0), 256.0) * 0.65 + duFogNoise(q * 3.0 + 7.0 - float2(0, rise), 768.0) * 0.35;
+    float billows = smoothstep(0.38, 0.72, n);
+    return u.dust.x * along * (0.06 + 2.4 * billows * billows) * inside;
+}
 static float duFogSun(float3 p, float distance, constant DUFogUniforms &u, depth2d_array<float> shadows) {
     if (u.sun.w < 0.5) return 1;
     constexpr sampler compare(filter::linear, address::clamp_to_edge, compare_func::greater_equal);   // reversed-Z
@@ -162,8 +195,9 @@ kernel void duFogVolume(uint2 id [[thread_position_in_grid]],
         float worldThrough = exp(-(rho * past) * (rho * past));
         float worldThickness = 2 * rho * rho * past;
         float depth = duGroundFogDepth(eye + direction * before, eye + direction * after, u, floorMap);
-        float ground = depth / max(span, 1e-4);
-        bool lit = depth > 0 || (worldThickness > 0 && sunShare > 0) || lights > 0;
+        float dust = duDustDepth(eye + direction * before, eye + direction * after, u, floorMap);
+        float ground = (depth + dust) / max(span, 1e-4);
+        bool lit = depth > 0 || dust > 0 || (worldThickness > 0 && sunShare > 0) || lights > 0;
         if (lit) {
             float sun = duFogSun(p, d, u, shadows) * duFogCloudShadow(p, u, cloudMap);
             float seen = through * worldThrough;
@@ -172,6 +206,12 @@ kernel void duFogVolume(uint2 id [[thread_position_in_grid]],
             float3 groundLight = u.groundColour.rgb * (u.ambient.rgb * 0.7 + u.sunColour.rgb * sun * phase * 0.15);
             scattered += groundLight * (1 - slice) * seen;
             skyward += groundLight * (1 - slice) * seen;
+            // A dust storm's billows: the dust's colour, lit by the sky and by the sun where it reaches them.
+            float dustSlice = exp(-dust);
+            float3 dustLight = u.dustColour.rgb * (u.ambient.rgb * 0.8 + u.sunColour.rgb * sun * phase * 0.3);
+            scattered += dustLight * (1 - dustSlice) * seen * slice;
+            skyward += dustLight * (1 - dustSlice) * seen * slice;
+            slice *= dustSlice;
             // The world's fog already greys toward the horizon colour; where the sun cannot reach it, it is darker —
             // the shafts.
             scattered += u.horizon.rgb * max(sunShare * phase * (sun - 1), -1.0) * worldThickness * span * seen;
