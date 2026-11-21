@@ -327,6 +327,10 @@ struct VertexIn {
 struct VertexOut {
     float4 position [[position]];
     float3 worldPosition;
+    /// **Where the surface rests before the wind moves it** — what decides which of a turning tree's leaves have fallen
+    /// (`duFallen`), so a leaf swaying across the pattern does not drop and come back every frame. `worldPosition` on
+    /// anything that does not sway.
+    float3 restPosition;
     float3 normal;
     float2 uv;
     /// Multiplies the surface's colour: white for a prop, the painted mix for the ground.
@@ -382,12 +386,14 @@ vertex VertexOut propVertex(VertexIn in [[stage_in]],
                             constant FrameUniforms &frame [[buffer(2)]])
 {
     float4 world = object.model * float4(in.position, 1);
+    float3 rest = world.xyz;
     world.xyz = duSwayed(world.xyz, object.model[3].xyz, length(object.model[1].xyz), object.sway, object.wind, object.emissive.w > 0.5);
     VertexOut out;
     out.soft = 0;
     seasonOf(object.model[3].xz, object.foliage, frame.weather, out.fallColour, out.fallLeaves);
-    out.position = seasonsOnFoliage && object.emissive.w > 0.5 && duShed(world.xyz, out.fallLeaves) ? duFallenPosition : frame.viewProjection * world;
+    out.position = seasonsOnFoliage && object.emissive.w > 0.5 && duShed(rest, out.fallLeaves) ? duFallenPosition : frame.viewProjection * world;
     out.worldPosition = world.xyz;
+    out.restPosition = rest;
     out.normal = (object.normalMatrix * float4(in.normal, 0)).xyz;
     out.uv = in.uv;
     out.tint = float3(1);
@@ -406,12 +412,14 @@ vertex VertexOut propInstancedVertex(VertexIn in [[stage_in]],
 {
     float4x4 model = copies[instance] * object.model;
     float4 world = model * float4(in.position, 1);
+    float3 rest = world.xyz;
     world.xyz = duSwayed(world.xyz, copies[instance][3].xyz, length(copies[instance][1].xyz), object.sway, object.wind, object.emissive.w > 0.5);
     VertexOut out;
     out.soft = 0;
     seasonOf(copies[instance][3].xz, object.foliage, frame.weather, out.fallColour, out.fallLeaves);
-    out.position = seasonsOnFoliage && object.emissive.w > 0.5 && duShed(world.xyz, out.fallLeaves) ? duFallenPosition : frame.viewProjection * world;
+    out.position = seasonsOnFoliage && object.emissive.w > 0.5 && duShed(rest, out.fallLeaves) ? duFallenPosition : frame.viewProjection * world;
     out.worldPosition = world.xyz;
+    out.restPosition = rest;
     float3 c0 = model[0].xyz, c1 = model[1].xyz, c2 = model[2].xyz;
     float3x3 cofactor = float3x3(cross(c1, c2), cross(c2, c0), cross(c0, c1));
     out.normal = cofactor * in.normal * sign(dot(c0, cross(c1, c2)));
@@ -439,6 +447,7 @@ vertex VertexOut snowCapVertex(VertexIn in [[stage_in]],
     out.soft = 0;
     out.position = frame.viewProjection * world;
     out.worldPosition = world.xyz;
+    out.restPosition = out.worldPosition;
     out.normal = cofactor * in.normal * sign(dot(c0, cross(c1, c2)));
     out.uv = float2(0.5);
     out.tint = float3(1);
@@ -469,6 +478,7 @@ vertex VertexOut effectMeshVertex(VertexIn in [[stage_in]],
     out.fallLeaves = 1;
     out.position = frame.viewProjection * world;
     out.worldPosition = world.xyz;
+    out.restPosition = out.worldPosition;
     float3 c0 = model[0].xyz, c1 = model[1].xyz, c2 = model[2].xyz;
     float3x3 cofactor = float3x3(cross(c1, c2), cross(c2, c0), cross(c0, c1));
     out.normal = cofactor * in.normal * sign(dot(c0, cross(c1, c2)));
@@ -518,6 +528,7 @@ vertex VertexOut groundVertex(GroundVertexIn in [[stage_in]],
     out.soft = 0;
     out.position = frame.viewProjection * world;
     out.worldPosition = world.xyz;
+    out.restPosition = out.worldPosition;
     out.normal = (object.normalMatrix * float4(in.normal, 0)).xyz;
     out.uv = in.uv;
     out.tint = in.colour.rgb;
@@ -606,7 +617,8 @@ vertex float4 shadowInstancedVertex(VertexIn in [[stage_in]],
 struct ShadowMaskOut {
     float4 position [[position]];
     float2 uv;
-    /// Where the surface is, and how much of its tree's leaves are left — for a turning tree's fallen leaves (`fallen`).
+    /// Where the surface rests before the wind moves it, and how much of its tree's leaves are left — for a turning tree's
+    /// fallen leaves (`fallen`).
     float3 world;
     float leaves [[flat]];
 };
@@ -616,13 +628,14 @@ vertex ShadowMaskOut shadowMaskPropVertex(VertexIn in [[stage_in]],
                                           constant ObjectUniforms &object [[buffer(1)]],
                                           constant float4x4 &lightViewProjection [[buffer(2)]]) {
     float4 world = object.model * float4(in.position, 1);
+    float3 rest = world.xyz;
     world.xyz = duSwayed(world.xyz, object.model[3].xyz, length(object.model[1].xyz), object.sway, object.wind, object.emissive.w > 0.5);
     float leaves = duLeavesLeft(object.model[3].xz, object.foliage);
     if (object.emissive.w > 0.5) {
-        if (duShed(world.xyz, leaves)) return { duFallenPosition, in.uv, world.xyz, 1 };
+        if (duShed(rest, leaves)) return { duFallenPosition, in.uv, rest, 1 };
         leaves = 1;
     }
-    return { lightViewProjection * world, in.uv, world.xyz, leaves };
+    return { lightViewProjection * world, in.uv, rest, leaves };
 }
 
 vertex ShadowMaskOut shadowMaskInstancedVertex(VertexIn in [[stage_in]],
@@ -631,13 +644,14 @@ vertex ShadowMaskOut shadowMaskInstancedVertex(VertexIn in [[stage_in]],
                                                constant float4x4 &lightViewProjection [[buffer(2)]],
                                                const device float4x4 *copies [[buffer(4)]]) {
     float4 world = copies[instance] * object.model * float4(in.position, 1);
+    float3 rest = world.xyz;
     world.xyz = duSwayed(world.xyz, copies[instance][3].xyz, length(copies[instance][1].xyz), object.sway, object.wind, object.emissive.w > 0.5);
     float leaves = duLeavesLeft(copies[instance][3].xz, object.foliage);
     if (object.emissive.w > 0.5) {
-        if (duShed(world.xyz, leaves)) return { duFallenPosition, in.uv, world.xyz, 1 };
+        if (duShed(rest, leaves)) return { duFallenPosition, in.uv, rest, 1 };
         leaves = 1;
     }
-    return { lightViewProjection * world, in.uv, world.xyz, leaves };
+    return { lightViewProjection * world, in.uv, rest, leaves };
 }
 
 /// Bound on the fragment stage by the batch itself: the object's uniforms at 1, its base map at 0. **A turning tree's
@@ -791,7 +805,7 @@ fragment float4 propFragment(VertexOut in [[stage_in]],
     }
     if (grunge.params.w > 0.5) albedo = grimed(albedo, worldPosition, faceNormal, grunge, grungeMap, linear);
     // **Through the year** (fall colors): a turning tree's leaves coloured or fallen, grass gone straw.
-    if (seasonsOnFoliage && !duThroughTheYear(albedo, base.a, worldPosition, in.fallColour, in.fallLeaves, object.params.z > 0, object.emissive.w > 0.5)) discard_fragment();
+    if (seasonsOnFoliage && !duThroughTheYear(albedo, base.a, in.restPosition, in.fallColour, in.fallLeaves, object.params.z > 0, object.emissive.w > 0.5)) discard_fragment();
     // **The weather on it** (Ductane's `duWeathered`): fallen leaves on the ground under turning trees, lying snow
     // on what faces the sky, dust settled in a storm, wet surfaces, puddles and running water, footprints in snow and soft
     // ground.

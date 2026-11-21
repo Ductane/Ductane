@@ -335,22 +335,29 @@ static inline float duShedHash(int3 c) {
 }
 
 /// **Whether a tree's leaf here has fallen** (vertex stage; a submesh that is leaves alone — `leafCard`): smooth noise
-/// a metre and a half across sets each place's moment, so a card's corners, a few tens of centimetres apart, fall
+/// three quarters of a metre across sets each place's moment, so a card's corners, a few tens of centimetres apart, fall
 /// together, and a fallen corner is given no position (``duFallenPosition``), which culls its triangles. A thinning tree
 /// then draws less, not more: dropped pixel by pixel, its holes let the forest behind show and cost a late-autumn frame
-/// up to 14 ms.
+/// up to 14 ms. `p` is where the leaf rests, before the wind moves it — swayed, a leaf crossing the pattern flickered.
+///
+/// **A tree thins all over, from its first leaf.** The noise was a metre and a half across and its share clipped at a
+/// quarter and three quarters, so a tree with 99% of its leaves left lost every place the noise ran high — a whole side
+/// of a small tree's canopy at once (found 2026-11-21, a tree held in mid-autumn missing its top). Now the share is
+/// spread without clipping, so 99% left drops about 1%, and the clumps are small enough to scatter through a canopy.
 static inline bool duShed(float3 p, float leaves) {
     if (leaves >= 1.0) return false;
     if (leaves <= 0.0) return true;
-    float3 g = p / 1.5, f = fract(g);
+    float3 g = p / 0.75, f = fract(g);
     int3 c = int3(floor(g));
     float3 u = f * f * (3.0 - 2.0 * f);
     float n = mix(mix(mix(duShedHash(c), duShedHash(c + int3(1, 0, 0)), u.x),
                       mix(duShedHash(c + int3(0, 1, 0)), duShedHash(c + int3(1, 1, 0)), u.x), u.y),
                   mix(mix(duShedHash(c + int3(0, 0, 1)), duShedHash(c + int3(1, 0, 1)), u.x),
                       mix(duShedHash(c + int3(0, 1, 1)), duShedHash(c + int3(1, 1, 1)), u.x), u.y), u.z);
-    // Value noise gathers round a half; spread back out so `leaves` is about the share left.
-    return smoothstep(0.25, 0.75, n) >= leaves;
+    // Value noise gathers round a half; spread back out so `leaves` is about the share left — never clipped, so no share
+    // of the canopy falls together the moment a tree starts to thin.
+    float share = 0.5 + 0.5 * tanh((n - 0.5) * 7.0) / tanh(3.5);
+    return share >= leaves;
 }
 
 /// A position no triangle is drawn with: a triangle with a corner here is culled whole.

@@ -203,7 +203,9 @@ public nonisolated enum MeshLoader {
                 mesh: metal,
                 bounds: BoundingBox(minimum: SIMD3(box.minBounds.x, box.minBounds.y, box.minBounds.z),
                                     maximum: SIMD3(box.maxBounds.x, box.maxBounds.y, box.maxBounds.z)),
-                materials: imported[ObjectIdentifier(model)].map { withFactors(read, from: $0) } ?? read,
+                // A material marked cut out that cuts nothing loads solid (``CutOut``).
+                materials: (imported[ObjectIdentifier(model)].map { withFactors(read, from: $0) } ?? read)
+                    .map(\.cuttingOnlyWhereItCuts),
                 nodeTransform: transforms[ObjectIdentifier(model)] ?? matrix_identity_float4x4)
         }
     }

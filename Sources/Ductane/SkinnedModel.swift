@@ -242,6 +242,7 @@ public nonisolated struct SkinnedGeometry: Sendable {
                 if let factors, factors.indices.contains(index) {
                     material = MeshLoader.withFactors([material], from: [factors[index]])[0]
                 }
+                material = material.cuttingOnlyWhereItCuts
                 if let same = groups.firstIndex(where: { Self.sameSurface($0.material, material) }) {
                     groups[same].indices += indices
                 } else {
