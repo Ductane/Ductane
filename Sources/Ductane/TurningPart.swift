@@ -24,10 +24,26 @@ public nonisolated struct TurningPart: Sendable, Equatable {
 
     /// **What turns, if anything does**: `meshes` gives each mesh's vertex positions in the prop's space and each of its
     /// submeshes' triangles as vertex indices, three at a time. Nil when no ring of pieces is found.
-    public static func find(meshes: [(positions: [SIMD3<Float>], submeshes: [[UInt32]])]) -> TurningPart? {
+    public static func find(meshes given: [(positions: [SIMD3<Float>], submeshes: [[UInt32]])]) -> TurningPart? {
+        // Triangles naming a vertex the mesh does not have are left out (a file is data from anyone); what turns is still
+        // said per triangle of what was given, those left out never turning.
+        let meshes = given.map { mesh in
+            (positions: mesh.positions, submeshes: mesh.submeshes.map { indices in
+                stride(from: 0, to: indices.count - 2, by: 3).flatMap { t -> [UInt32] in
+                    let triangle = indices[t..<(t + 3)]
+                    return triangle.allSatisfy { Int($0) < mesh.positions.count } ? Array(triangle) : []
+                }
+            })
+        }
         // Every position, welded: a piece's faces are split at hard edges, and still one piece.
         var lower = SIMD3<Float>(repeating: .greatestFiniteMagnitude), upper = -lower
-        for mesh in meshes { for p in mesh.positions { lower = simd_min(lower, p); upper = simd_max(upper, p) } }
+        for mesh in meshes {
+            for p in mesh.positions {
+                // A model is data from anyone: a position that is not a number has no place to turn about.
+                guard p.x.isFinite, p.y.isFinite, p.z.isFinite else { return nil }
+                lower = simd_min(lower, p); upper = simd_max(upper, p)
+            }
+        }
         let size = simd_reduce_max(upper - lower)
         guard size.isFinite, size > 0 else { return nil }
         let grain = size * 1e-5
@@ -35,7 +51,9 @@ public nonisolated struct TurningPart: Sendable, Equatable {
         var welded: [SIMD3<Float>] = []
         let ids: [[Int32]] = meshes.map { mesh in
             mesh.positions.map { p in
-                let key = SIMD3<Int32>(Int32((p.x / grain).rounded()), Int32((p.y / grain).rounded()), Int32((p.z / grain).rounded()))
+                // Measured from the lowest corner, so every key is in range: at most 1e5 grains across.
+                let q = ((p - lower) / grain).rounded(.toNearestOrAwayFromZero)
+                let key = SIMD3<Int32>(Int32(clamping: Int(q.x)), Int32(clamping: Int(q.y)), Int32(clamping: Int(q.z)))
                 if let id = weld[key] { return id }
                 let id = Int32(welded.count)
                 weld[key] = id
@@ -181,10 +199,11 @@ public nonisolated struct TurningPart: Sendable, Equatable {
             out = simd_normalize(out)
             return abs(simd_dot(out, piece.along)) >= 0.7
         })
-        let turns: [[[Bool]]] = meshes.enumerated().map { m, mesh in
+        let turns: [[[Bool]]] = given.enumerated().map { m, mesh in
             mesh.submeshes.map { indices in
                 stride(from: 0, to: indices.count - 2, by: 3).map { t in
-                    turningPieces.contains(pieceOf[root(ids[m][Int(indices[t])])]!)
+                    guard indices[t..<(t + 3)].allSatisfy({ Int($0) < mesh.positions.count }) else { return false }
+                    return turningPieces.contains(pieceOf[root(ids[m][Int(indices[t])])]!)
                 }
             }
         }

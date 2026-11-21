@@ -2285,7 +2285,8 @@ public final class WorldRenderer: GameLoop {
             }
             let base = vertexBuffer.buffer.contents() + vertexBuffer.offset
             let node = shown.loaded.nodeTransform
-            let positions = (0..<mesh.vertexCount).map { i -> SIMD3<Float> in
+            let vertexCount = min(mesh.vertexCount, (vertexBuffer.buffer.length - vertexBuffer.offset) / 32)
+            let positions = (0..<vertexCount).map { i -> SIMD3<Float> in
                 let p = base.advanced(by: i * 32).loadUnaligned(as: SIMD3<Float>.self)
                 let q = node * SIMD4(p, 1)
                 return SIMD3(q.x, q.y, q.z)
@@ -2416,9 +2417,12 @@ public final class WorldRenderer: GameLoop {
             let part = mesh.submeshes[submesh]
             let start = part.indexBuffer.buffer.contents() + part.indexBuffer.offset
             var low = Float.greatestFiniteMagnitude, high = -Float.greatestFiniteMagnitude
+            let vertexCount = min(mesh.vertexCount, (vertices.buffer.length - vertices.offset) / 32)
             for i in 0..<part.indexCount {
                 let index = part.indexType == .uint32 ? Int(start.advanced(by: i * 4).loadUnaligned(as: UInt32.self))
                     : Int(start.advanced(by: i * 2).loadUnaligned(as: UInt16.self))
+                // An index past the mesh's vertices is a damaged file's, and left out.
+                guard index < vertexCount else { continue }
                 let p = base.advanced(by: index * 32).loadUnaligned(as: SIMD3<Float>.self)
                 let y = (shown.loaded.nodeTransform * SIMD4(p, 1)).y
                 low = min(low, y); high = max(high, y)
@@ -4337,8 +4341,8 @@ public final class WorldRenderer: GameLoop {
             let centre0 = SIMD3(centre4.x, centre4.y, centre4.z)
             let r = max(simd_reduce_max(box.size) / 2 * WorldScene.largestScale(of: base), 0.05)
             // Its own pace, start and hop, from where it was put.
-            var h = UInt32(bitPattern: Int32(truncatingIfNeeded: Int(centre0.x * 97))) &* 2654435761
-                ^ UInt32(bitPattern: Int32(truncatingIfNeeded: Int(centre0.z * 89))) &* 2246822519
+            // From the bits of where it stands — never a float turned into an integer, which traps on one too large.
+            var h = centre0.x.bitPattern &* 2654435761 ^ centre0.z.bitPattern &* 2246822519
             func next() -> Float { h ^= h >> 15; h = h &* 0x2C1B3C6D; h ^= h >> 12; return Float(h & 0xFFFF) / 65535 }
             let pace = 0.75 + 0.5 * next(), phase = 0.15 + 0.7 * next(), hop = 1.6 + 1.6 * next(), wobble = next() * 6.28
             let s = rollDistance * pace + phase * loop

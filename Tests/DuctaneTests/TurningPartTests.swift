@@ -136,3 +136,17 @@ private func windmill() -> (positions: [SIMD3<Float>], indices: [UInt32], sailTr
     let read = try JSONDecoder().decode(WorldFile.self, from: JSONEncoder().encode(file))
     #expect(read.materialSway == [0: ["Material": .cloth]])
 }
+
+/// A model is data from anyone: an index past its vertices is left out, a position that is not a number finds nothing,
+/// and neither traps.
+@Test func aDamagedModelNeitherTrapsNorTurnsWhatIsNotThere() throws {
+    var mill = windmill()
+    mill.indices += [0, 1, 99_999]
+    let part = try #require(TurningPart.find(meshes: [(mill.positions, [mill.indices])]))
+    #expect(part.turns[0][0].count == mill.indices.count / 3)
+    #expect(part.turns[0][0].last == false)
+    var broken = mill.positions
+    broken[0] = SIMD3(.nan, 0, 0)
+    #expect(TurningPart.find(meshes: [(broken, [mill.indices])]) == nil)
+    #expect(TurningPart.find(meshes: [([SIMD3(1e30, -1e30, 0), .zero, SIMD3(1, 0, 0)], [[0, 1, 2]])]) == nil)
+}
