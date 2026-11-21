@@ -292,18 +292,23 @@ public nonisolated struct Waymark: Sendable, Equatable {
         return out
     }
 
-    public var isOver: Bool { age >= look.duration }
+    /// **Seconds the way waits for the scan sent with it** (2026-11-21): its ring's time to reach as far as it goes. The
+    /// pulse goes out from the player and what it passes is outlined; then the line sweeps out to the place and its beam
+    /// rises — the order the look was designed in. None when the look sends no scan.
+    public var lead: Float { look.scan.isOn ? look.scan.reach / max(look.scan.speed, 0.1) : 0 }
 
-    /// **How far the line has swept out**, meters along it.
-    public var front: Float { age * look.sweepSpeed }
+    public var isOver: Bool { age >= lead + look.duration }
+
+    /// **How far the line has swept out**, meters along it — nothing while the scan goes out.
+    public var front: Float { max(age - lead, 0) * look.sweepSpeed }
 
     /// The whole mark's fade at its end, 1 to 0.
     public var ending: Float {
-        look.fadeOut > 0 ? simd_clamp((look.duration - age) / look.fadeOut, 0, 1) : (isOver ? 0 : 1)
+        look.fadeOut > 0 ? simd_clamp((lead + look.duration - age) / look.fadeOut, 0, 1) : (isOver ? 0 : 1)
     }
 
-    /// How bright the beam is now: up within a third of a second, fading with the rest.
-    public var beamOpacity: Float { look.beam.isVisible ? min(age / 0.35, 1) * ending : 0 }
+    /// How bright the beam is now: up within a third of a second once the line starts out, fading with the rest.
+    public var beamOpacity: Float { look.beam.isVisible ? min(max(age - lead, 0) / 0.35, 1) * ending : 0 }
 
     // MARK: The way
 

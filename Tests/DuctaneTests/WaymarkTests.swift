@@ -91,7 +91,8 @@ struct WaymarkTests {
     @Test("It sweeps out, the beam is up at once, and it all fades at the end")
     func timing() {
         #expect(Waymark.Look().duration == 15)
-        let six = Waymark.Look(duration: 6, fadeOut: 1.5)
+        var six = Waymark.Look(duration: 6, fadeOut: 1.5)
+        six.scan.isOn = false
         var mark = Waymark(way: [.zero, SIMD3(0, 0, -100)], target: SIMD3(0, 0, -100), surface: flat, look: six)
         mark.step(deltaTime: 0.5)
         #expect(abs(mark.front - 20) < 1e-3)
@@ -100,6 +101,20 @@ struct WaymarkTests {
         mark.step(deltaTime: 4.75)   // 5.25 of 6: half through the fade
         #expect(abs(mark.beamOpacity - 0.5) < 0.01)
         mark.step(deltaTime: 1)
+        #expect(mark.isOver && mark.ending == 0)
+    }
+
+    @Test("With a scan, the way waits for its ring to go out, then sweeps out and its beam rises")
+    func waitsForTheScan() {
+        var look = Waymark.Look(duration: 6, fadeOut: 1.5)
+        look.scan = Waymark.Look.Scan(reach: 40, speed: 20)
+        var mark = Waymark(way: [.zero, SIMD3(0, 0, -100)], target: SIMD3(0, 0, -100), surface: flat, look: look)
+        #expect(abs(mark.lead - 2) < 1e-5)
+        mark.step(deltaTime: 1.5)
+        #expect(mark.front == 0 && mark.beamOpacity == 0 && !mark.isOver)
+        mark.step(deltaTime: 1)   // 0.5 past the ring
+        #expect(abs(mark.front - 20) < 1e-3 && mark.beamOpacity == 1)
+        mark.step(deltaTime: 5.6)
         #expect(mark.isOver && mark.ending == 0)
     }
 
@@ -236,7 +251,7 @@ struct WaymarkTests {
         look.width = 0.02
         var beam = Waymark(way: [.zero, SIMD3(0, 0, -12)], target: SIMD3(0, 0, -12), surface: flat, look: look)
         beam.step(deltaTime: 0.01)   // the line not out yet; the beam rising
-        beam.step(deltaTime: 1)
+        beam.step(deltaTime: 1 + beam.lead)
         #expect(redness(try frame(of: beam, device: device).pixels) > redness(empty.pixels) + 2_000)
     }
 }
