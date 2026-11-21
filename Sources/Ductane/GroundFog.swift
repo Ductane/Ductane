@@ -45,8 +45,8 @@ public nonisolated struct GroundFog: Sendable, Equatable, Codable {
 
 public nonisolated extension Weather {
     /// **How thick ground fog is at its floor at `hour`** (0…24 on the world's clock), per metre: the weather's fog, the
-    /// dawn's mist and the wet after rain, the thickest counting for most; thinned by wind and by dust, and scaled by the
-    /// world's ``GroundFog/amount``. 0 for none.
+    /// dawn's mist and the wet after rain, the thickest counting for most, thinned by wind — and never thinner than the rain
+    /// falling makes it; thinned by dust, and scaled by the world's ``GroundFog/amount``. 0 for none.
     func groundFogDensity(hour: Float) -> Float {
         guard groundFog.amount > 0 else { return 0 }
         let s = settings
@@ -57,8 +57,14 @@ public nonisolated extension Weather {
         let parts = [foggy, dawn * 0.12, wet * 0.2].sorted(by: >)
         let base = min(parts[0] + parts[1] * 0.3 + parts[2] * 0.15, 1)
         let calm = 1 - Self.smooth(4, 13, s.windSpeed)
-        return base * calm * (1 - min(max(s.dust, 0), 1)) * groundFog.amount * GroundFog.thickest
+        // **Falling rain greys the air whatever the wind does** (2026-11-21): the wind blows lying mist away, not the rain.
+        // Without it a storm, whose wind clears the mist, drew clearer than a shower.
+        let falling = s.snow ? 0 : min(max(s.precipitation, 0), 1) * Self.rainHaze
+        return max(base * calm, falling) * (1 - min(max(s.dust, 0), 1)) * groundFog.amount * GroundFog.thickest
     }
+
+    /// How much of the thickest ground fog the heaviest rain makes on its own — a downpour's grey a few hundred metres off.
+    internal static let rainHaze: Float = 0.3
 
     /// **The dawn's mist**, 0…1 by the hour: building from evening through the night, thickest just after sunrise, burnt
     /// off by late morning, none through the afternoon.

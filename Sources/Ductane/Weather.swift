@@ -198,8 +198,10 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
             Settings(cloudCover: mix(0.75, 1), precipitation: mix(0.25, 1), windSpeed: mix(2, 9),
                      fogDensity: mix(0.001, 0.004))
         case .storm:
+            // Thicker than rain at any severity (2026-11-21): a storm drew clearer than rain, its wind having blown rain's
+            // mist away and nothing of its own in the air.
             Settings(cloudCover: mix(0.9, 1), precipitation: mix(0.6, 1), windSpeed: mix(8, 20),
-                     fogDensity: mix(0.002, 0.005), lightning: mix(1, 8))
+                     fogDensity: mix(0.003, 0.008), lightning: mix(1, 8))
         case .snow:
             Settings(cloudCover: mix(0.7, 0.95), precipitation: mix(0.2, 1), snow: true, windSpeed: mix(1, 8),
                      fogDensity: mix(0.002, 0.008))
@@ -236,7 +238,10 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
         light.colour = base.colour * direct
         // What the cloud takes from the sun lights the sky instead — an overcast day is dim, not dark.
         let lost = Self.luminance(base.colour - light.colour)
-        let darker = 1 - 0.4 * wet * (s.snow ? 0.4 : 1)
+        // **A thundercloud is darker than a rain cloud** (2026-11-21): by how often it strikes, full from four a minute — a
+        // storm drew as bright as a shower.
+        let thunder = min(max(s.lightning / 4, 0), 1)
+        let darker = (1 - 0.4 * wet * (s.snow ? 0.4 : 1)) * (1 - 0.3 * thunder)
         func grey(_ c: SIMD3<Float>, _ lift: Float) -> SIMD3<Float> {
             Self.cloudGrey * max(Self.luminance(c) + lift, 0)
         }
@@ -269,6 +274,18 @@ public nonisolated struct Weather: Sendable, Equatable, Codable {
         }
         return light
     }
+
+    /// **The exposure under the weather**: the hour's (``DaySky/Lighting/exposureStops``, from the clear sky's light),
+    /// opened by at most ``cloudExposure`` stops for what the cloud takes — a camera opens a little under cloud, not all the
+    /// way. Worked out from the light under the weather, a storm's dark sky opened the exposure two stops and drew the storm
+    /// as bright as a clear day, its haze white (2026-11-21).
+    public static func exposureStops(under weathered: DaySky.Lighting, clear: DaySky.Lighting) -> Float {
+        let hour = clear.exposureStops
+        return hour + min(max(weathered.exposureStops - hour, 0) * 0.35, cloudExposure)
+    }
+
+    /// The most the weather opens the exposure, in stops.
+    public static let cloudExposure: Float = 0.6
 
     /// **How thick the air is** under this weather: the world's own fog and the weather's, whichever is thicker
     /// counting for most — a foggy world in fog is no thinner, and rain still greys a clear one.

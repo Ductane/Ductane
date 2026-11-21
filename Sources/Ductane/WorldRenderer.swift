@@ -4441,8 +4441,9 @@ public final class WorldRenderer: GameLoop {
                             covering: Bool) {
         let viewProjection = self.viewProjection
         // **A little of the eye's adjustment to the dark**: night is shown darker, not black — a scene has
-        // to be judgeable at any hour — so exposure opens up as the light falls, by at most three stops.
-        engine.toneMapping.exposureStops = light.exposureStops
+        // to be judgeable at any hour — so exposure opens up as the light falls, by at most three stops. By the hour's
+        // light, not the weather's (``Weather/exposureStops(under:clear:)``).
+        engine.toneMapping.exposureStops = Weather.exposureStops(under: light, clear: frameDaySky.lighting)
         // The grid follows the camera's target, sized to how far out the camera is.
         let reach = max(camera.distance * 12, 60)
         let c = shadowMap?.cascades ?? Self.cascades(reaching: 0)

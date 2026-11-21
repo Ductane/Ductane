@@ -209,3 +209,39 @@ struct WeatherSkyTests {
         #expect(GraphicsSettings.Preset.high.settings.fog == .high)
     }
 }
+
+/// **A storm is the heaviest weather and looks it** (2026-11-21): darker and thicker-aired than rain at every severity,
+/// whatever its wind does to lying mist — it drew clearer than a shower, its wind having blown rain's mist away.
+@Test func aStormIsDarkerAndThickerThanRain() {
+    let noon = DaySky(timeOfDay: 12).lighting
+    func brightness(_ l: DaySky.Lighting) -> Float { simd_reduce_add(l.horizon + l.zenith + l.skyLight + l.colour) }
+    for severity in stride(from: Float(0), through: 1, by: 0.25) {
+        let rain = Weather(kind: .rain, severity: severity), storm = Weather(kind: .storm, severity: severity)
+        #expect(brightness(storm.lighting(noon)) < brightness(rain.lighting(noon)) * 0.9, "severity \(severity)")
+        #expect(storm.settings.fogDensity > rain.settings.fogDensity, "severity \(severity)")
+        #expect(storm.groundFogDensity(hour: 14) >= rain.groundFogDensity(hour: 14), "severity \(severity)")
+    }
+    // A gale does not clear the rain out of the air; it does clear dry mist.
+    let windyRain = Weather(byHand: Weather.Settings(cloudCover: 1, precipitation: 1, snow: false, windSpeed: 20,
+                                                     fogDensity: 0, lightning: 0, dust: 0))
+    #expect(windyRain.groundFogDensity(hour: 14) > 0)
+    let windySnow = Weather(byHand: Weather.Settings(cloudCover: 1, precipitation: 1, snow: true, windSpeed: 20,
+                                                     fogDensity: 0, lightning: 0, dust: 0))
+    #expect(windySnow.groundFogDensity(hour: 14) == 0)
+    // Clear weather is still exactly as it was.
+    #expect(Weather().lighting(noon) == noon)
+}
+
+/// **Exposure follows the hour, not the cloud** (2026-11-21): a storm's dark sky opened the exposure two stops and drew it as
+/// bright as a clear day. Cloud opens it at most ``Weather/cloudExposure``; a clear sky not at all.
+@Test func exposureFollowsTheHourNotTheCloud() {
+    let noon = DaySky(timeOfDay: 12).lighting
+    let storm = Weather(kind: .storm, severity: 1).lighting(noon)
+    #expect(Weather.exposureStops(under: noon, clear: noon) == noon.exposureStops)
+    let opened = Weather.exposureStops(under: storm, clear: noon) - noon.exposureStops
+    #expect(opened > 0 && opened <= Weather.cloudExposure + 1e-6)
+    #expect(storm.exposureStops - noon.exposureStops > 1)   // what it was: well over a stop
+    // Night keeps its own adjustment.
+    let night = DaySky(timeOfDay: 1).lighting
+    #expect(Weather.exposureStops(under: night, clear: night) == night.exposureStops)
+}
