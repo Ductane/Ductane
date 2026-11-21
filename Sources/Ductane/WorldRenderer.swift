@@ -85,7 +85,10 @@ public final class WorldRenderer: GameLoop {
         didSet {
             // Fall colors: what each prop does through the year, and where fallen leaves lie, follow what it changes.
             if oldValue.foliage != scene.foliage || oldValue.guessesByName != scene.guessesByName { foliageKinds = [:] }
-            if oldValue.sway != scene.sway || oldValue.guessesByName != scene.guessesByName { swayKinds = [:] }
+            if oldValue.sway != scene.sway || oldValue.guessesByName != scene.guessesByName {
+                swayKinds = [:]
+                rebakeFarPicturesForSway()
+            }
             if oldValue.foliage != scene.foliage || oldValue.placements != scene.placements
                 || oldValue.scatters != scene.scatters { litterStale = true }
             // **A placement dragged changes that placement's copy only**, as a scattered copy's does below.
@@ -336,6 +339,8 @@ public final class WorldRenderer: GameLoop {
         let roughness: Float
         /// The meshes drawn into it, at what level.
         let source: (meshes: [ShownMesh], tier: Int)
+        /// How the prop moves in the wind (`swayVector`'s x), so the bake shades its foliage as the near copies are.
+        var sway: Float = 0
         var isBaked = false
 
         /// **Drawn as the picture at or under this many pixels across** (the copy's bounding sphere on screen): three
@@ -1029,6 +1034,7 @@ public final class WorldRenderer: GameLoop {
         guard var prop = props[url] else { return nil }
         if farPictures[url] == nil {
             let made = makeImpostor(for: prop, named: url.deletingPathExtension().lastPathComponent)
+            made?.sway = swayVector(for: url, bounds: prop.bounds).x
             farPictures[url] = .some(made)
             if made != nil { engine.commitResidency() }
         }
@@ -1047,11 +1053,27 @@ public final class WorldRenderer: GameLoop {
         if dressedFarPictures[key] == nil {
             let worn = look.values.map(\.name).sorted().joined(separator: ", ")
             let made = makeImpostor(for: prop, named: "\(url.deletingPathExtension().lastPathComponent) wearing \(worn)")
+            made?.sway = swayVector(for: url, bounds: prop.bounds).x
             dressedFarPictures[key] = .some(made)
             if made != nil { engine.commitResidency() }
         }
         prop.impostor = dressedFarPictures[key] ?? nil
         return prop
+    }
+
+    /// **A far picture shades its foliage by the prop's kind** (`foliageBend`), so one whose kind the scene changed is baked
+    /// again where it is — the same textures, drawn over at the next frame's pre-pass.
+    private func rebakeFarPicturesForSway() {
+        let pictures = farPictures.compactMap { url, picture in picture.map { (url, $0) } }
+            + dressedFarPictures.compactMap { key, picture in picture.map { (key.prop, $0) } }
+        for (url, picture) in pictures {
+            guard let bounds = props[url]?.bounds else { continue }
+            let kind = swayVector(for: url, bounds: bounds).x
+            guard kind != picture.sway else { continue }
+            picture.sway = kind
+            picture.isBaked = false
+            if !impostorsToBake.contains(where: { $0 === picture }) { impostorsToBake.append(picture) }
+        }
     }
 
     /// Far pictures of scattered prototypes dressed in other materials, by prop and look — `nil` where one has none.
@@ -1145,7 +1167,8 @@ public final class WorldRenderer: GameLoop {
                     guard let address = write(ObjectUniforms(
                         model: toUnit * shown.loaded.nodeTransform, normalMatrix: matrix_identity_float4x4,
                         baseColour: material.baseColor, emissive: .zero,
-                        params: SIMD4(material.roughness, 0, shown.cutoffs[submesh], 0))) else { return }
+                        params: SIMD4(material.roughness, 0, shown.cutoffs[submesh], 0),
+                        sway: SIMD4(impostor.sway, 0, 0, 0))) else { return }
                     parts.append(ShadowPart(mesh: shown.loaded.mesh, indices: shown.indices(submesh: submesh, level: impostor.source.tier),
                                             uniforms: address, baseMap: shown.baseMaps[submesh], copies: nil))
                 }

@@ -683,6 +683,30 @@ static float3 grimed(float3 albedo, float3 p, float3 n, constant GrungeUniforms 
     return mix(albedo, albedo * g * grunge.colour.rgb, grunge.colour.a);
 }
 
+/// **Foliage is shaded as foliage** — a plant's or a tree's cut-out cards, its grass blades and leaves — as foliage shaders
+/// in Unity and Unreal shade it: **the normal bent toward the sky**, so a clump is lit as a soft mass rather than blade by
+/// blade (a pack's upright grass cards carry normals pointing sideways, and a high sun lit a meadow nearly black), and
+/// **sunlight through the blade** (``foliageTransmission``). A plant is bent the most; a tree's leaves less, so a canopy
+/// keeps its shape. `swayKind` is `ObjectUniforms.sway.x` (1 a tree, 2 a plant); a solid surface is left as it is. A pack
+/// that already points its cards' normals up, as many do, changes little.
+static inline float foliageBend(float swayKind, float cutoff) {
+    if (cutoff <= 0) return 0.0;
+    if (swayKind > 1.5 && swayKind < 2.5) return 0.8;
+    if (swayKind > 0.5 && swayKind < 1.5) return 0.35;
+    return 0.0;
+}
+static inline float3 foliageNormal(float3 n, float bend) {
+    return bend > 0 ? normalize(mix(n, float3(0, 1, 0), bend)) : n;
+}
+/// **Sunlight through a leaf or a blade**: thin foliage lets light through, so a meadow or a canopy seen against the sun
+/// glows rather than going dark. Most toward the sun, some whenever the sun is on the card's far side; as much of it as
+/// reaches the card (`sunLit`, its shadow and the clouds').
+static inline float foliageTransmission(float3 cardNormal, float3 v, float3 l) {
+    float through = saturate(dot(-cardNormal, l));
+    float againstTheSun = pow(saturate(dot(-v, l)), 4.0);
+    return 0.35 * through + 0.65 * againstTheSun;
+}
+
 fragment float4 propFragment(VertexOut in [[stage_in]],
                              bool frontFacing [[front_facing]],
                              constant ObjectUniforms &object [[buffer(1)]],
@@ -736,6 +760,10 @@ fragment float4 propFragment(VertexOut in [[stage_in]],
             n = -n;
         }
     }
+    // **Foliage shaded as foliage** (`foliageBend`): the seen side's normal kept for the light through it.
+    float3 cardNormal = n;
+    float bend = object.params.w > 0.5 ? 0.0 : foliageBend(object.sway.x, object.params.z);
+    n = foliageNormal(n, bend);
     // The sheet repeated as its material says (`_Albedo_Tiling`, carried with its grime).
     float2 uv = grunge.params.w > 0.5 ? in.uv * grunge.params.z : in.uv;
     float4 base = baseMap.sample(linear, uv);
@@ -779,8 +807,10 @@ fragment float4 propFragment(VertexOut in [[stage_in]],
     float3 l = frame.sunDirection.xyz;
     float3 h = normalize(l + v);
     // The sun's light, less what is shadowed. The sky's ambient still reaches into shade.
-    float nl = saturate(dot(n, l)) * sunVisibility(frame, worldPosition, shadowMap, object.params.z > 0)
-             * duCloudShadow(worldPosition, l, frame.weather, cloudMap);
+    float sunLit = sunVisibility(frame, worldPosition, shadowMap, object.params.z > 0)
+                 * duCloudShadow(worldPosition, l, frame.weather, cloudMap);
+    float nl = saturate(dot(n, l)) * sunLit;
+    float transmitted = bend > 0 ? foliageTransmission(cardNormal, v, l) * sunLit : 0.0;
 
     // Wet is glossy: a soaked surface toward 0.15, a puddle toward a mirror.
     float roughness = duWetRoughness(surfaceRoughness, weathered);
@@ -789,7 +819,7 @@ fragment float4 propFragment(VertexOut in [[stage_in]],
 
     // What glows: the material's emission times its map, white where it has none.
     // (The ground is never under itself: a coarse chunk's outline can sit a little below the full ground it is read from.)
-    float3 colour = albedo * (frame.sunColour.rgb * nl / M_PI_F + hemisphere(n, frame) * occlusion * (coarseGround ? 1.0 : skyReaching(worldPosition, frame, groundVertices))
+    float3 colour = albedo * (frame.sunColour.rgb * (nl + transmitted) / M_PI_F + hemisphere(n, frame) * occlusion * (coarseGround ? 1.0 : skyReaching(worldPosition, frame, groundVertices))
                             + pointLighting(worldPosition, n, frame))
                   + frame.sunColour.rgb * specular * nl
                   + object.emissive.rgb * glowMap.sample(linear, in.uv).rgb;
@@ -1055,6 +1085,8 @@ fragment ImpostorBakeTargets impostorBakeFragment(ImpostorBakeOut in [[stage_in]
     if (object.params.z > 0 && object.baseColour.a * a < object.params.z) discard_fragment();
     float3 n = normalize(in.normal);
     if (!frontFacing && dot(n, in.direction) < 0) n = -n;
+    // Bent as the near copies are (`foliageBend`): the bake's frame is the prop's own, its up the prop's up.
+    n = foliageNormal(n, foliageBend(object.sway.x, object.params.z));
     ImpostorBakeTargets out;
     out.albedo = float4(object.baseColour.rgb * base.rgb, 1);
     out.normal = float4(n * 0.5 + 0.5, 1);
