@@ -1394,6 +1394,12 @@ static float3 reflectedScene(float3 p, float3 r, float worth, float3 sky, consta
     return sky;
 }
 
+/// The height of still water's faint ripple at a point, 0…1.75: three octaves of value noise, the finer turned against
+/// the coarser so no direction lines up.
+static float waterRipple(float2 p) {
+    return duValueNoise(p * 0.8) + 0.5 * duValueNoise(p * 2.1 + 17.3) + 0.25 * duValueNoise(float2(p.y, -p.x) * 4.7 + 5.1);
+}
+
 /// Water as an eye judges it: its own deep color looking down, the sky reflected looking across
 /// (Fresnel), and the sun's glint. **Flat, with no waves** — enough to read where the shore is and how
 /// the light falls on it; moving water is a look for later.
@@ -1403,9 +1409,16 @@ fragment float4 waterFragment(WaterOut in [[stage_in]],
                               texture2d<float> solidColour [[texture(3)]],
                               depth2d<float> solidDepth [[texture(6)]],
                              texture3d<float> fogVolume [[texture(9)]]) {
-    // A faint ripple in the normal, from the position alone, so the glint breaks up instead of being a disc.
+    // A faint ripple in the normal, so the glint breaks up instead of being a disc: the slope of three octaves of value
+    // noise, which never repeats. Two crossed sine waves did this until 2026-11-20 — an egg-crate a few metres across that,
+    // looked across at a low angle, the reflection picked out as rows of round blobs. Where a ripple is smaller than a pixel
+    // it only shimmers, so it fades as the surface recedes.
     float2 p = in.worldPosition.xz;
-    float3 n = normalize(float3(0.025 * sin(p.x * 1.7 + p.y * 0.6), 1, 0.025 * sin(p.y * 1.9 - p.x * 0.8)));
+    const float e = 0.04;
+    float h = waterRipple(p);
+    float2 slope = float2(waterRipple(p + float2(e, 0)) - h, waterRipple(p + float2(0, e)) - h) / e;
+    float strength = 0.012 * (1.0 - smoothstep(0.12, 0.6, length(fwidth(p))));
+    float3 n = normalize(float3(-slope.x * strength, 1, -slope.y * strength));
     float3 v = normalize(frame.cameraPosition.xyz - in.worldPosition);
     float facing = saturate(dot(n, v));
     float fresnel = 0.02 + 0.98 * pow(1.0 - facing, 5.0);
