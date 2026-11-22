@@ -29,6 +29,11 @@ public nonisolated struct WorldPackage: Sendable {
     public let folder: URL
     /// What it describes.
     public let world: WorldFile
+    /// **What changed since the copy this one replaced**: the paths inside the package whose bytes differ from that copy,
+    /// or that it did not have — a world editor's newer export of the world a game is showing, handed to
+    /// ``WorldRenderer/show(_:loaded:)`` so only what changed is read again. Empty when the copy unpacked before was used
+    /// as it was; nil when there was no copy before, or the package is a folder read in place.
+    public let changedFiles: Set<String>?
 
     /// Opens the package at `url` — a `.usdz` or a folder.
     /// - Parameter cache: where a `.usdz` is unpacked; by default the app's own caches (``defaultCache``).
@@ -38,9 +43,10 @@ public nonisolated struct WorldPackage: Sendable {
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder) else { throw OpenError.missing(url.path) }
         if isFolder.boolValue {
             folder = url
+            changedFiles = nil
         } else {
             guard let cache = cache ?? Self.defaultCache else { throw OpenError.noCache }
-            folder = try Self.unpack(url, into: cache)
+            (folder, changedFiles) = try Self.unpack(url, into: cache)
         }
         let description = folder.appending(path: Self.descriptionPath)
         guard FileManager.default.fileExists(atPath: description.path) else { throw OpenError.noDescription(url.lastPathComponent) }
@@ -93,15 +99,18 @@ public nonisolated struct WorldPackage: Sendable {
     static let stampName = ".package"
 
     /// Unpacks `package` into a folder of `cache` named after it, unless the copy there came from the same package —
-    /// the same size and date. Returns the folder.
-    static func unpack(_ package: URL, into cache: URL) throws -> URL {
+    /// the same size and date. Returns the folder, and the paths whose bytes differ from the copy it replaced (nil when
+    /// there was none).
+    static func unpack(_ package: URL, into cache: URL) throws -> (folder: URL, changed: Set<String>?) {
         let fm = FileManager.default
         let attributes = try fm.attributesOfItem(atPath: package.path)
         let size = (attributes[.size] as? Int) ?? 0
         let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSinceReferenceDate ?? 0
         let stamp = "\(size) \(modified)"
         let folder = cache.appending(path: package.deletingPathExtension().lastPathComponent, directoryHint: .isDirectory)
-        if (try? String(contentsOf: folder.appending(path: stampName), encoding: .utf8)) == stamp { return folder }
+        if (try? String(contentsOf: folder.appending(path: stampName), encoding: .utf8)) == stamp { return (folder, []) }
+        let hadCopy = fm.fileExists(atPath: folder.appending(path: stampName).path)
+        var changed: Set<String> = []
 
         // Unpacked beside it first and moved into place whole, so a copy cut short is never taken for a finished one.
         try fm.createDirectory(at: cache, withIntermediateDirectories: true)
@@ -113,12 +122,16 @@ public nonisolated struct WorldPackage: Sendable {
             if path.hasSuffix("/") { continue }
             let target = staging.appending(path: path)
             try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try data.subdata(in: range).write(to: target)
+            let entry = data.subdata(in: range)
+            try entry.write(to: target)
+            // Compared with the copy being replaced, so a game showing it reads again only what changed.
+            if hadCopy, (try? Data(contentsOf: folder.appending(path: path), options: .alwaysMapped)) == entry { continue }
+            changed.insert(path)
         }
         try Data(stamp.utf8).write(to: staging.appending(path: stampName))
         try? fm.removeItem(at: folder)
         try fm.moveItem(at: staging, to: folder)
-        return folder
+        return (folder, hadCopy ? changed : nil)
     }
 
     /// An entry's path if it stays inside the package: relative, no `..` or `.` parts, nothing empty but a folder's end.

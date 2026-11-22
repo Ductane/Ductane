@@ -15,16 +15,17 @@ nonisolated enum ProjectTemplate {
 //  main.swift
 //  {{TARGET}}
 //
-//  Opens a window, finds the world in the Worlds folder, and hands it to the game. The engine owns no window:
-//  the window, its view and its menu are this app's.
+//  Opens a window and a world, and hands the world to the game. The engine owns no window: the window, its view and
+//  its menu are this app's.
+//
+//  **Which world**: the one a world editor opens in this app — its Play button launches the game with the scene's
+//  export, and hands it each newer export as the scene is saved — or else the first in the Worlds folder, which Run in
+//  Xcode builds into the app.
 //
 
 import AppKit
 import MetalKit
 import Ductane
-
-let application = NSApplication.shared
-application.setActivationPolicy(.regular)
 
 /// Says what went wrong and quits.
 func fail(_ message: String, _ detail: String = "") -> Never {
@@ -35,9 +36,8 @@ func fail(_ message: String, _ detail: String = "") -> Never {
     exit(1)
 }
 
-/// **The world this game opens**: the first scene package in the app's Worlds folder, by name. A world editor's
-/// export writes it there, and Run builds the folder into the app.
-func worldURL() -> URL? {
+/// **The world built into the app**: the first scene package in its Worlds folder, by name.
+func bundledWorld() -> URL? {
     guard let folder = Bundle.main.url(forResource: "{{WORLDS}}", withExtension: nil),
           let files = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
     else { return nil }
@@ -46,65 +46,106 @@ func worldURL() -> URL? {
         .first
 }
 
-// A menu with Quit, which a window of its own does not bring.
-let menu = NSMenu()
-let appItem = NSMenuItem()
-menu.addItem(appItem)
-appItem.submenu = NSMenu()
-appItem.submenu?.addItem(withTitle: "Quit \(ProcessInfo.processInfo.processName)",
-                         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-application.mainMenu = menu
+final class GameApp: NSObject, NSApplicationDelegate {
+    private var game: Game?
+    private var window: NSWindow?
+    private var displayLink: CAMetalDisplayLink?
+    /// A world opened before the window is up: the one this game was launched to play.
+    private var opened: URL?
 
-guard let url = worldURL() else {
-    fail("There's no world to play.", "Export a scene into this project's {{WORLDS}} folder, then press Run again.")
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // A menu with Quit, which a window of its own does not bring.
+        let menu = NSMenu()
+        let appItem = NSMenuItem()
+        menu.addItem(appItem)
+        appItem.submenu = NSMenu()
+        appItem.submenu?.addItem(withTitle: "Quit \(ProcessInfo.processInfo.processName)",
+                                 action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        NSApplication.shared.mainMenu = menu
+    }
+
+    /// **A world opened in the game** — at launch, before the window is up, or while it plays: a newer copy, shown in
+    /// place with the player where they stand.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let url = urls.first(where: { $0.pathExtension.lowercased() == "usdz" }) else { return }
+        guard let game else {
+            opened = url
+            return
+        }
+        do {
+            try game.show(WorldPackage(contentsOf: url), startingOver: false)
+        } catch {
+            // The world playing stays; the alert says why the new one did not come in.
+            let alert = NSAlert()
+            alert.messageText = "\(url.lastPathComponent) didn't open."
+            alert.informativeText = "\(error)"
+            if let window { alert.beginSheetModal(for: window) } else { alert.runModal() }
+        }
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard let url = opened ?? bundledWorld() else {
+            fail("There's no world to play.", "Export a scene into this project's {{WORLDS}} folder, then press Run again.")
+        }
+        guard let device = MTLCreateSystemDefaultDevice() else { fail("This Mac has no Metal device.") }
+
+        let engine: FrameRenderer
+        let game: Game
+        do {
+            // Fails on a Mac without Metal 4.
+            engine = try FrameRenderer(device: device)
+            game = try Game(engine: engine, world: WorldPackage(contentsOf: url))
+        } catch {
+            fail("\(url.lastPathComponent) didn't open.", "\(error)")
+        }
+        self.game = game
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
+                              styleMask: [.titled, .closable, .resizable, .miniaturizable],
+                              backing: .buffered, defer: false)
+        window.title = "{{TITLE_SWIFT}}"
+        window.center()
+        window.acceptsMouseMovedEvents = true
+        self.window = window
+
+        let view = GameView(frame: window.contentLayoutRect, device: device)
+        view.colorPixelFormat = FrameRenderer.colorPixelFormat
+        view.depthStencilPixelFormat = FrameRenderer.depthPixelFormat
+        // The view hosts the layer; the display link below drives the frames.
+        view.isPaused = true
+        view.enableSetNeedsDisplay = false
+        view.game = game
+        window.contentView = view
+
+        // The engine holds its game weakly: `game` keeps the world alive.
+        engine.game = game.world
+        guard let layer = view.layer as? CAMetalLayer else { fail("The view has no Metal layer.") }
+        FrameRenderer.prepare(layer, device: device)
+        let displayLink = engine.makeDisplayLink(for: layer)
+        displayLink.add(to: .main, forMode: .common)
+        self.displayLink = displayLink
+        game.world.viewportSizeChanged(width: Int(view.drawableSize.width), height: Int(view.drawableSize.height))
+
+        // Leaving the window lets go of the mouse and the keys.
+        NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window,
+                                               queue: .main) { [weak game] _ in
+            MainActor.assumeIsolated { game?.letGo() }
+        }
+
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(view)
+        NSApplication.shared.activate()
+    }
+
+    // Closing the window quits.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }
-guard let device = MTLCreateSystemDefaultDevice() else { fail("This Mac has no Metal device.") }
 
-let engine: FrameRenderer
-let game: Game
-do {
-    // Fails on a Mac without Metal 4.
-    engine = try FrameRenderer(device: device)
-    game = try Game(engine: engine, world: WorldPackage(contentsOf: url))
-} catch {
-    fail("\(url.lastPathComponent) didn't open.", "\(error)")
-}
-
-let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
-                      styleMask: [.titled, .closable, .resizable, .miniaturizable],
-                      backing: .buffered, defer: false)
-window.title = "{{TITLE_SWIFT}}"
-window.center()
-window.acceptsMouseMovedEvents = true
-
-let view = GameView(frame: window.contentLayoutRect, device: device)
-view.colorPixelFormat = FrameRenderer.colorPixelFormat
-view.depthStencilPixelFormat = FrameRenderer.depthPixelFormat
-// The view hosts the layer; the display link below drives the frames.
-view.isPaused = true
-view.enableSetNeedsDisplay = false
-view.game = game
-window.contentView = view
-
-// The engine holds its game weakly: `game` keeps the world alive.
-engine.game = game.world
-guard let layer = view.layer as? CAMetalLayer else { fail("The view has no Metal layer.") }
-FrameRenderer.prepare(layer, device: device)
-let displayLink = engine.makeDisplayLink(for: layer)
-displayLink.add(to: .main, forMode: .common)
-game.world.viewportSizeChanged(width: Int(view.drawableSize.width), height: Int(view.drawableSize.height))
-
-// Closing the window quits; leaving it lets go of the mouse and the keys.
-NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { _ in
-    MainActor.assumeIsolated { application.terminate(nil) }
-}
-NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { _ in
-    MainActor.assumeIsolated { game.letGo() }
-}
-
-window.makeKeyAndOrderFront(nil)
-window.makeFirstResponder(view)
-application.activate()
+let application = NSApplication.shared
+application.setActivationPolicy(.regular)
+// The application holds its delegate weakly; this keeps it.
+let delegate = GameApp()
+application.delegate = delegate
 application.run()
 
 """#
@@ -138,7 +179,12 @@ final class Game {
     /// Where the solid props were last gathered round; nil until the first are in, and the player waits until then.
     private var solidsCentre: SIMD2<Float>?
     private var gathering = false
+    /// Counts gathers, so one begun for a world since replaced is dropped.
+    private var gatherRun = 0
     private var soundscape: Soundscape?
+    /// What is playing, and counts starts, so sound still loading for a world since replaced is dropped.
+    private var playingSounds: WorldFile.Sounds?
+    private var soundRun = 0
     /// Seconds stepped since the last frame, for the sound.
     private var stepped: Float = 0
 
@@ -148,26 +194,48 @@ final class Game {
 
     init(engine: FrameRenderer, world package: WorldPackage) throws {
         world = try WorldRenderer(engine: engine)
-        let ground = try package.ground()
-        surroundings = .init(groundHeight: { x, z in ground?.height(x: x, z: z) ?? 0 },
-                             boundary: package.world.boundary)
+        body = CharacterController(feet: .zero)
+        camera = Camera(position: .zero, yaw: 0)
+        surroundings = .init(groundHeight: { _, _ in 0 })
+        world.onStep = { [weak self] seconds in self?.step(seconds) }
+        world.onFrame = { [weak self] in self?.frame() }
+        input.start()
+        try show(package, startingOver: true)
+    }
 
-        // Start at the scene's first spawn marker, or in its middle.
-        let spawn = package.world.markers("spawn").first
-        let x = spawn?.position.x ?? 0, z = spawn?.position.z ?? 0
-        body = CharacterController(feet: SIMD3(x, spawn?.position.y ?? ground?.height(x: x, z: z) ?? 0, z))
-        camera = Camera(position: body.eye, yaw: spawn?.yaw ?? 0)
-        world.camera = WorldRenderer.View(camera)
+    /// **Shows a world**: at the start, at the scene's first spawn marker; or again, when its editor hands over a newer
+    /// copy as the scene is saved — then the player stays where they stand, only what changed is read again, and the
+    /// sounds start again only if they changed.
+    func show(_ package: WorldPackage, startingOver: Bool) throws {
+        let ground = try package.ground()
+        // What was solid stays solid until the new world's props are gathered, so nobody falls through a floor.
+        let solid = surroundings.meshes
+        surroundings = .init(groundHeight: { x, z in ground?.height(x: x, z: z) ?? 0 }, boundary: package.world.boundary)
+        surroundings.meshes = solid
+        if startingOver {
+            // Start at the scene's first spawn marker, or in its middle.
+            let spawn = package.world.markers("spawn").first
+            let x = spawn?.position.x ?? 0, z = spawn?.position.z ?? 0
+            body = CharacterController(feet: SIMD3(x, spawn?.position.y ?? ground?.height(x: x, z: z) ?? 0, z))
+            camera = Camera(position: body.eye, yaw: spawn?.yaw ?? 0)
+            world.camera = WorldRenderer.View(camera)
+        } else if let ground {
+            // Never left under ground that was raised.
+            let feet = body.feet, floor = ground.height(x: feet.x, z: feet.z)
+            if floor > feet.y { body.teleport(to: SIMD3(feet.x, floor, feet.z)) }
+        }
 
         // The props load in the background and appear as they arrive; once they are all in, they can be walked into.
         try world.show(package) { [weak self] failures in
             for (prop, error) in failures { print("\(prop.lastPathComponent) didn't load: \(error)") }
             self?.gatherSolids()
         }
-        world.onStep = { [weak self] seconds in self?.step(seconds) }
-        world.onFrame = { [weak self] in self?.frame() }
-        input.start()
-        if let sounds = package.world.sounds { startSound(sounds, from: package) }
+        let sounds = package.world.sounds
+        let recordingsChanged = package.changedFiles?.contains { $0.hasPrefix("sounds/") } ?? true
+        if startingOver || sounds != playingSounds || recordingsChanged {
+            stopSound()
+            if let sounds { startSound(sounds, from: package) }
+        }
     }
 
     /// One fixed step of the simulation.
@@ -177,7 +245,7 @@ final class Game {
             body.step(yaw: camera.yaw, input: input.movement, isJumpHeld: input.isHeld(.jump),
                       isCrouching: input.isHeld(.crouch), deltaTime: seconds, in: surroundings)
         }
-        if let centre = solidsCentre, simd_distance(centre, SIMD2(body.feet.x, body.feet.z)) > Self.regather {
+        if !gathering, let centre = solidsCentre, simd_distance(centre, SIMD2(body.feet.x, body.feet.z)) > Self.regather {
             gatherSolids()
         }
         stepped += seconds
@@ -206,12 +274,14 @@ final class Game {
 
     /// **The props near the player, made solid**: gathered here, built into one collision mesh off the main thread.
     private func gatherSolids() {
-        guard !gathering else { return }
+        gatherRun += 1
+        let run = gatherRun
         gathering = true
         let centre = SIMD2(body.feet.x, body.feet.z)
         let near = world.solids(around: centre, reach: Self.reach)
         Task {
             let mesh = await Task.detached { near.isEmpty ? nil : CollisionMesh(placed: near) }.value
+            guard run == gatherRun else { return }
             surroundings.meshes = mesh
             if solidsCentre == nil, let mesh { standOnFloor(of: mesh) }
             solidsCentre = centre
@@ -228,14 +298,27 @@ final class Game {
 
     /// **The world's sounds**: its sound points, ambience, scattered sounds, music and the weather's recordings.
     private func startSound(_ sounds: WorldFile.Sounds, from package: WorldPackage) {
+        playingSounds = sounds
         // No output device: the game plays quietly.
         guard let audio = try? AudioEngine() else { return }
         let soundscape = Soundscape(audio: audio, music: sounds.music == nil ? nil : MusicPlayer())
+        let run = soundRun
         Task {
             let failures = await soundscape.play(sounds) { package.url(of: $0) }
             for (file, error) in failures { print("\(file) didn't load: \(error)") }
+            guard run == soundRun else {
+                soundscape.stop()
+                return
+            }
             self.soundscape = soundscape
         }
+    }
+
+    private func stopSound() {
+        soundRun += 1
+        soundscape?.stop()
+        soundscape = nil
+        playingSounds = nil
     }
 }
 
@@ -308,6 +391,11 @@ silicon and macOS 26 is needed for Metal 4.
 The game opens the first `.usdz` scene package in `{{WORLDS}}/`, by name. Export a scene there from your world
 editor, and turn on its export on save, so every save of the scene lands in the game the next time you press Run.
 
+A scene package opened in the game — from the Finder, `open -a {{TARGET}} Scene.usdz`, or a world editor's play
+button — is played instead. Opened again while the game runs, a newer copy is shown in place: the player stays where
+they stand, and only the props whose files changed are read again. So the game needs building only when its code
+changes, not every time the world does.
+
 ## Controls
 
 | Key | Does |
@@ -326,6 +414,36 @@ A controller works too: the left stick moves, the right stick looks.
 - The scene's markers are in `package.world.markers`. The game starts at the first one of kind `spawn`; what other
   kinds mean is yours to decide.
 - Ductane's guide: https://ductane.com/docs/
+
+"""#
+
+    /// **What the generated Info.plist cannot say**: that the game opens scene packages, so a `.usdz` opened in it — from
+    /// the Finder, `open -a`, or a world editor's play button — reaches `application(_:open:)`. Without a document type
+    /// macOS refuses to hand it one ("cannot open the specified document"). At Alternate rank: the game is offered in
+    /// Open With, never made the default for the type. Merged with the settings Xcode generates; outside the target's
+    /// folder, so it is not also copied in as a resource.
+    static let infoPlist = #"""
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Scene Package</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.pixar.universal-scene-description-mobile</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
 
 """#
 
@@ -543,6 +661,7 @@ DerivedData/
 				ENABLE_HARDENED_RUNTIME = YES;
 				EXCLUDED_ARCHS = x86_64;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = {{TITLE_PBX}};
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.games";
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
@@ -567,6 +686,7 @@ DerivedData/
 				ENABLE_HARDENED_RUNTIME = YES;
 				EXCLUDED_ARCHS = x86_64;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = {{TITLE_PBX}};
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.games";
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;

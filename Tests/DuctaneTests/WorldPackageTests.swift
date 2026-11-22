@@ -94,6 +94,30 @@ struct WorldPackageTests {
         #expect(!FileManager.default.fileExists(atPath: marker.path), "a changed package replaces its copy")
     }
 
+    @Test("A newer copy of a package says which files changed since the copy it replaced")
+    func saysWhatChanged() throws {
+        let work = Self.folder()
+        defer { try? FileManager.default.removeItem(at: work) }
+        let url = work.appending(path: "Clearing.usdz"), cache = work.appending(path: "Cache")
+        var entries = try Self.entries()
+        try StoredZip.data(entries).write(to: url)
+        #expect(try WorldPackage(contentsOf: url, cache: cache).changedFiles == nil, "nothing was there before")
+        #expect(try WorldPackage(contentsOf: url, cache: cache).changedFiles == [], "the same package, used as it was")
+
+        // The world renamed and the prop's texture redrawn: those two, and nothing the editor wrote the same.
+        var world = try WorldFile.read(entries[3].1)
+        world.name = "Clearing at dusk"
+        entries[3].1 = try world.data()
+        entries[2].1 = entries[2].1 + Data([0])
+        entries.append(("props/2_rock/rock.usda", Data("#usda 1.0\n".utf8)))
+        try StoredZip.data(entries).write(to: url)
+        let newer = try WorldPackage(contentsOf: url, cache: cache)
+        #expect(newer.changedFiles == [WorldPackage.descriptionPath, "props/1_textured-quad/material-map.png",
+                                       "props/2_rock/rock.usda"])
+        #expect(try WorldPackage(contentsOf: work.appending(path: "Cache/Clearing")).changedFiles == nil,
+                "a folder read in place cannot say")
+    }
+
     @Test("A folder holding the same files is read in place")
     func folder() throws {
         let work = Self.folder()

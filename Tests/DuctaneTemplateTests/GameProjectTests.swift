@@ -58,6 +58,7 @@ import Testing
         #expect(paths.contains("MarshWalk/Game.swift"))
         #expect(paths.contains("MarshWalk/GameView.swift"))
         #expect(paths.contains("Worlds/README.md"))
+        #expect(paths.contains("Info.plist"), "the game says it opens scene packages")
         // Every placeholder is filled in.
         for (path, contents) in project().files() { #expect(!contents.contains("{{"), "\(path)") }
     }
@@ -70,6 +71,10 @@ import Testing
         #expect(pbxproj.contains("minimumVersion = 1.5.0;"))
         #expect(pbxproj.contains("PRODUCT_BUNDLE_IDENTIFIER = \"com.example.MarshWalk\";"))
         #expect(pbxproj.contains("INFOPLIST_KEY_CFBundleDisplayName = \"Marsh Walk\";"))
+        #expect(pbxproj.components(separatedBy: "INFOPLIST_FILE = Info.plist;").count == 3, "both configurations")
+        let plist = try #require(project().files().first { $0.path == "Info.plist" }?.contents)
+        #expect(plist.contains("com.pixar.universal-scene-description-mobile"))
+        #expect(plist.contains("<string>Alternate</string>"), "offered, never the default")
     }
 
     @Test func aCheckoutIsALocalPackage() throws {

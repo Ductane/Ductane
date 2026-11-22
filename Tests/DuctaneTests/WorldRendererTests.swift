@@ -185,6 +185,67 @@ struct WorldRendererTests {
         #expect(world.drawn.view > 0, "the ground and the prop were drawn")
     }
 
+    /// A world editor hands a running game a newer export of the world as the scene is saved: what did not change is shown
+    /// at once, a prop whose file changed is read again, and a prop no longer placed is let go.
+    @Test("A newer copy of a package reads again only the props that changed")
+    func showsANewerCopy() async throws {
+        guard let device = MTLCreateSystemDefaultDevice(), device.supportsFamily(.metal4) else { return }
+        let (_, folder) = try Self.package()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let work = FileManager.default.temporaryDirectory.appending(path: "WorldRendererTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: work) }
+        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+        let url = work.appending(path: "Clearing.usdz"), cache = work.appending(path: "Cache")
+        var entries = try FileManager.default.subpathsOfDirectory(atPath: folder.path).sorted().compactMap { path -> (String, Data)? in
+            var isFolder: ObjCBool = false
+            FileManager.default.fileExists(atPath: folder.appending(path: path).path, isDirectory: &isFolder)
+            return isFolder.boolValue ? nil : (path, try Data(contentsOf: folder.appending(path: path)))
+        }
+        try StoredZip.data(entries).write(to: url)
+
+        let world = try WorldRenderer(engine: FrameRenderer(device: device), textureCache: nil)
+        var failures: [(URL, Error)]?
+        let package = try WorldPackage(contentsOf: url, cache: cache)
+        try world.show(package) { failures = $0 }
+        for _ in 0..<500 where failures == nil { try await Task.sleep(for: .milliseconds(20)) }
+        let prop = package.propURL(0)
+        #expect(world.bounds(of: prop)?.maximum.x == 1)
+
+        // Saved again as it was: nothing to read.
+        try StoredZip.data(entries).write(to: url)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 5)], ofItemAtPath: url.path)
+        let same = try WorldPackage(contentsOf: url, cache: cache)
+        #expect(same.changedFiles == [])
+        try world.show(same) { _ in }
+        #expect(!world.isLoadingProps, "every prop kept as it was")
+        #expect(world.bounds(of: prop)?.maximum.x == 1)
+
+        // The prop made twice as wide: read again.
+        let index = try #require(entries.firstIndex { $0.0.hasSuffix("textured-quad.usda") })
+        let wide = try #require(String(data: entries[index].1, encoding: .utf8))
+            .replacingOccurrences(of: "[(0,0,0), (1,0,0), (1,1,0), (0,1,0)]", with: "[(0,0,0), (2,0,0), (2,1,0), (0,1,0)]")
+        entries[index].1 = Data(wide.utf8)
+        try StoredZip.data(entries).write(to: url)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 10)], ofItemAtPath: url.path)
+        let newer = try WorldPackage(contentsOf: url, cache: cache)
+        failures = nil
+        try world.show(newer) { failures = $0 }
+        #expect(world.isLoadingProps, "the changed prop is read again")
+        for _ in 0..<500 where failures == nil { try await Task.sleep(for: .milliseconds(20)) }
+        #expect(failures?.isEmpty == true)
+        #expect(world.bounds(of: prop)?.maximum.x == 2)
+
+        // Placed nowhere any more: let go.
+        var bare = try WorldFile.read(entries.first { $0.0 == WorldPackage.descriptionPath }!.1)
+        bare.placements = []
+        let description = try #require(entries.firstIndex { $0.0 == WorldPackage.descriptionPath })
+        entries[description].1 = try bare.data()
+        try StoredZip.data(entries).write(to: url)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 15)], ofItemAtPath: url.path)
+        try world.show(WorldPackage(contentsOf: url, cache: cache)) { _ in }
+        #expect(world.bounds(of: prop) == nil)
+    }
+
     /// With reflections on, the water mirrors the scene drawn behind it — the solid pass's colour is kept for it — and with
     /// them off it reflects the sky alone, as before, in one pass.
     @Test("Water reflects the scene with reflections on, and only the sky with them off")

@@ -13,6 +13,10 @@ public extension WorldRenderer {
     /// and grime, the shapes its walkers meet and what they pass through. Its props load in the background, appearing as they arrive; `loaded` hears
     /// the ones that failed once they are all in, and the far shadows are fitted to the world (``fitExtent()``).
     ///
+    /// **Shown again with a newer copy of the same package** — a world editor's export handed to a running game — only
+    /// the props whose files changed are read again (``WorldPackage/changedFiles``), and props the world no longer places
+    /// are let go: what stayed the same appears at once.
+    ///
     /// ```swift
     /// let world = try WorldRenderer(engine: engine)
     /// try world.show(WorldPackage(contentsOf: Bundle.main.url(forResource: "Meadow", withExtension: "usdz")!))
@@ -38,6 +42,8 @@ public extension WorldRenderer {
         self.collisionShape = { shapes[$0] }
         walkedThrough = Set(world.walkedThrough.filter(urls.indices.contains).map { urls[$0] })
         scene = WorldScene(package)
+        // A newer copy of the package shown before — its editor saved again — reads again only what changed.
+        showNewerFiles(package.changedFiles.map { Set($0.map(package.url(of:))) }, under: package.folder)
         showGround(try package.groundSource())
         loadPropsInBackground { [weak self] failures, _ in
             self?.fitExtent()

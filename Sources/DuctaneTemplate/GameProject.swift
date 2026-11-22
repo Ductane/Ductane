@@ -118,6 +118,7 @@ public nonisolated struct GameProject: Sendable, Equatable {
             ("\(target)/main.swift", fill(ProjectTemplate.main)),
             ("\(target)/Game.swift", fill(ProjectTemplate.game)),
             ("\(target)/GameView.swift", fill(ProjectTemplate.view)),
+            ("Info.plist", ProjectTemplate.infoPlist),
             ("\(Self.worldsFolder)/README.md", fill(ProjectTemplate.worldsReadme)),
             ("README.md", fill(ProjectTemplate.readme)),
             (".gitignore", ProjectTemplate.gitignore),

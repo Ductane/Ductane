@@ -902,10 +902,34 @@ public final class WorldRenderer: GameLoop {
     public var onLoadingProgress: ((Int, Int) -> Void)?
 
     private func wantedProps() -> Set<URL> {
-        Set(scene.placements.map(\.prop) + scene.scatters.flatMap(\.prototypes) + scene.wornFiles
-            + scene.effectMeshes.values).filter {
-            props[$0] == nil && !failedProps.contains($0) && !loading.contains($0)
-        }
+        scenePropFiles().filter { props[$0] == nil && !failedProps.contains($0) && !loading.contains($0) }
+    }
+
+    /// Every file the scene draws from: what it places and scatters, what they wear, what its effects throw.
+    private func scenePropFiles() -> Set<URL> {
+        Set(scene.placements.map(\.prop) + scene.scatters.flatMap(\.prototypes) + scene.wornFiles + scene.effectMeshes.values)
+    }
+
+    /// **A newer copy of the files the scene draws from has replaced the old** (2026-11-22) — a world editor's export
+    /// handed again to a running game (``show(_:loaded:)``). Props whose file is among `changed`, or beside one (a
+    /// texture they wear), are read again; props the scene no longer draws are let go; the rest are kept as loaded, so a
+    /// moved crate costs nothing to show. `changed` nil — not known — reads again every prop under `folder`.
+    func showNewerFiles(_ changed: Set<URL>?, under folder: URL) {
+        let root = folder.standardizedFileURL.path + "/"
+        let changedPaths = changed.map { Set($0.map { $0.standardizedFileURL.path }) }
+        let changedFolders = changedPaths.map { Set($0.map { ($0 as NSString).deletingLastPathComponent }) }
+        let drawn = scenePropFiles()
+        let stale = Set(props.keys.filter { url in
+            guard drawn.contains(url) else { return true }
+            let path = url.standardizedFileURL.path
+            guard path.hasPrefix(root) else { return false }
+            guard let changedPaths, let changedFolders else { return true }
+            return changedPaths.contains(path) || changedFolders.contains((path as NSString).deletingLastPathComponent)
+        })
+        // A load begun for the old files finishes nothing; a prop that failed may load now.
+        stopLoading()
+        forgetFailures()
+        reload(stale, files: changed ?? [])
     }
 
     /// The main-actor half of loading: textures, bounds, the lower-detail levels' buffers, residency.
@@ -1339,7 +1363,8 @@ public final class WorldRenderer: GameLoop {
 
     /// Props whose files changed on disk — a character Rigkin exported again over the same file — are read again,
     /// textures included, at the next load.
-    public func reload(_ urls: Set<URL>) {
+    /// - Parameter files: other files read again too — textures that changed on disk.
+    public func reload(_ urls: Set<URL>, files: Set<URL> = []) {
         // **What the dropped props held on the GPU is retired**, not left in the residency set (2026-10-28): it kept every
         // mesh, level and texture alive, and switching texture quality from half to full and back took the
         // app from 1.9 GB to 6.1 and climbing. The same leak was in reloading a prop whose file changed.
@@ -1367,6 +1392,7 @@ public final class WorldRenderer: GameLoop {
             failedProps.remove(url)
             textures.forget(file: url)
         }
+        for file in files { textures.forget(file: file) }
         retire(dropped + Self.forgotten(texturesBefore, now: textures.allocations))
         forgetTurning(urls)
     }
