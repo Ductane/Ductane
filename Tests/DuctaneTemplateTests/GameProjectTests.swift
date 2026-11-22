@@ -75,6 +75,8 @@ import Testing
         let plist = try #require(project().files().first { $0.path == "Info.plist" }?.contents)
         #expect(plist.contains("com.pixar.universal-scene-description-mobile"))
         #expect(plist.contains("<string>Alternate</string>"), "offered, never the default")
+        let main = try #require(project().files().first { $0.path.hasSuffix("main.swift") }?.contents)
+        #expect(main.contains("\"\(GameProject.quitRequest)\""), "the game hears the stop button's notice")
     }
 
     @Test func aCheckoutIsALocalPackage() throws {

@@ -18,6 +18,8 @@ nonisolated enum ProjectTemplate {
 //  Opens a window and a world, and hands the world to the game. The engine owns no window: the window, its view and
 //  its menu are this app's.
 //
+//  A world editor's stop button quits it with a notice (`com.ductane.game.quit`, addressed to its bundle identifier).
+//
 //  **Which world**: the one a world editor opens in this app — its Play button launches the game with the scene's
 //  export, and hands it each newer export as the scene is saved — or else the first in the Worlds folder, which Run in
 //  Xcode builds into the app.
@@ -125,6 +127,13 @@ final class GameApp: NSObject, NSApplicationDelegate {
         displayLink.add(to: .main, forMode: .common)
         self.displayLink = displayLink
         game.world.viewportSizeChanged(width: Int(view.drawableSize.width), height: Int(view.drawableSize.height))
+
+        // **Asked to quit from outside** — a world editor's stop button. A sandboxed editor may not quit another app, so it
+        // posts this notice, addressed to this game's bundle identifier.
+        DistributedNotificationCenter.default().addObserver(forName: Notification.Name("com.ductane.game.quit"),
+                                                            object: Bundle.main.bundleIdentifier, queue: .main) { _ in
+            MainActor.assumeIsolated { NSApplication.shared.terminate(nil) }
+        }
 
         // Leaving the window lets go of the mouse and the keys.
         NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window,

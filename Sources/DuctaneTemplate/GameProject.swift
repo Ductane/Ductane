@@ -29,6 +29,10 @@ public nonisolated struct GameProject: Sendable, Equatable {
     public static let repository = "https://github.com/Ductane/Ductane.git"
     /// The folder, beside the code, that the game opens its worlds from. Its contents are built into the app.
     public static let worldsFolder = "Worlds"
+    /// **The notice that asks a running game to quit** — a distributed notification of this name whose object is the game's
+    /// bundle identifier. A world editor's stop button posts it: a sandboxed app may not quit another app, but it may post
+    /// a notice with no user info, and the game quits itself on hearing one addressed to it.
+    public static let quitRequest = "com.ductane.game.quit"
 
     /// The game's name as a person wrote it — its window's title and the name under its icon.
     public var name: String
