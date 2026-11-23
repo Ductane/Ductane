@@ -19,7 +19,7 @@ Add the package to your game's `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Ductane/Ductane.git", from: "1.5.0")
+    .package(url: "https://github.com/Ductane/Ductane.git", from: "1.6.0")
 ],
 targets: [
     .executableTarget(name: "MyGame", dependencies: ["Ductane"])
